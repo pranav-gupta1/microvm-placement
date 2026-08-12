@@ -106,6 +106,61 @@ func TestLeadTermAnticipatesTheRamp(t *testing.T) {
 	}
 }
 
+// TestNoisyFlatLoadDoesNotInflateTheFleet is a regression test for a real
+// over-provisioning bug, and the reason the slope is estimated by regression
+// rather than by differencing consecutive samples.
+//
+// Arrivals are Poisson, so a rate measured over a short window is noisy. If the
+// derivative is taken from two such samples, the noise swamps the signal, and
+// because only a rising rate feeds the lead term, clamping at zero rectifies
+// that symmetric noise into a systematic over-estimate. On the 1000 rps double
+// ramp this inflated the fleet from 79 pods to 198 and left half the compute
+// bill idle.
+//
+// Here the true arrival rate is dead flat, so the correct answer is the steady
+// state size and nothing more.
+func TestNoisyFlatLoadDoesNotInflateTheFleet(t *testing.T) {
+	cfg := productionConfig()
+	cfg.ScaleDownStabilization = 0
+	a := mustNew(t, cfg)
+
+	const (
+		trueRate = 500.0
+		interval = 250 * time.Millisecond
+		// Poisson noise on a rate measured over the interval.
+		noise = 45.0
+	)
+	// Deterministic alternating noise, which is the worst case for
+	// differencing: every consecutive pair implies a huge slope.
+	now := time.Now()
+	var maxReplicas int
+	for i := 0; i < 80; i++ {
+		sign := 1.0
+		if i%2 == 1 {
+			sign = -1.0
+		}
+		rate := trueRate + sign*noise
+		d := a.Decide(Sample{
+			At:          now.Add(time.Duration(i) * interval),
+			ArrivalRate: rate,
+			InflightVMs: int(trueRate * cfg.MeanTTL.Seconds()),
+		})
+		// Ignore the first few samples while the window fills.
+		if i > 12 && d.Replicas > maxReplicas {
+			maxReplicas = d.Replicas
+		}
+	}
+
+	// Steady state: 500 rps x 0.5 s = 250 microVMs, / 0.8 = 313 slots, / 8 = 40 pods.
+	const steadyState = 40
+	// A little headroom is fine, but nothing like the 2.5x the differencing
+	// estimator produced.
+	if maxReplicas > steadyState+8 {
+		t.Errorf("flat but noisy load provisioned %d pods, want no more than %d: the derivative is amplifying noise",
+			maxReplicas, steadyState+8)
+	}
+}
+
 func TestFallingRateProducesNoNegativeLead(t *testing.T) {
 	cfg := productionConfig()
 	cfg.ScaleDownStabilization = 0
