@@ -62,6 +62,31 @@ type Config struct {
 	// MaxReplicas is the ceiling, a blast-radius limit on both cost and the
 	// consequences of a bad signal.
 	MaxReplicas int
+	// SlopeWindow is how much history the derivative is estimated over.
+	//
+	// This is not a cosmetic smoothing knob, it corrects a real bias. Arrivals
+	// are Poisson, so a rate measured over a short interval carries noise of
+	// about sqrt(rate/interval). Differencing two such estimates amplifies
+	// that noise, and because only a rising rate contributes to the lead term,
+	// clamping at zero rectifies symmetric noise into a systematic
+	// over-estimate. Measured on the 1000 rps double ramp, differencing
+	// consecutive 250 ms samples inflated the fleet from the 79 pods the
+	// capacity plan calls for to 198.
+	//
+	// Estimating the slope by least squares over a window suppresses that
+	// noise by roughly the window length to the three-halves power while still
+	// tracking a genuine ramp. Defaults to DefaultSlopeWindow.
+	SlopeWindow time.Duration
+}
+
+// DefaultSlopeWindow is long enough to average away Poisson noise in the
+// arrival-rate estimate and short enough to track a real ramp without lag.
+const DefaultSlopeWindow = 3 * time.Second
+
+func (c *Config) applyDefaults() {
+	if c.SlopeWindow == 0 {
+		c.SlopeWindow = DefaultSlopeWindow
+	}
 }
 
 // Validate reports whether the configuration is usable.
@@ -86,6 +111,9 @@ func (c Config) Validate() error {
 	}
 	if c.MaxReplicas < c.MinReplicas {
 		return fmt.Errorf("autoscale: MaxReplicas %d is below MinReplicas %d", c.MaxReplicas, c.MinReplicas)
+	}
+	if c.SlopeWindow < 0 {
+		return fmt.Errorf("autoscale: SlopeWindow must not be negative, got %s", c.SlopeWindow)
 	}
 	return nil
 }
@@ -124,8 +152,8 @@ type Decision struct {
 type Autoscaler struct {
 	cfg Config
 
-	hasPrev   bool
-	prev      Sample
+	// history holds recent samples inside the slope window, oldest first.
+	history   []Sample
 	rateSlope float64
 
 	// peak is the highest replica count decided within the stabilisation
@@ -136,6 +164,7 @@ type Autoscaler struct {
 
 // New returns an Autoscaler.
 func New(cfg Config) (*Autoscaler, error) {
+	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -176,22 +205,54 @@ func (a *Autoscaler) Decide(s Sample) Decision {
 	}
 }
 
-// updateSlope maintains d(arrival_rate)/dt from consecutive samples.
+// updateSlope re-estimates d(arrival_rate)/dt by ordinary least squares over
+// every sample inside the slope window.
+//
+// Regression rather than differencing because the arrival rate is a noisy
+// measurement of a Poisson process, and the lead term's clamp at zero turns
+// noise in the derivative into a systematic over-provision. See the commentary
+// on Config.SlopeWindow.
 func (a *Autoscaler) updateSlope(s Sample) {
-	if !a.hasPrev {
-		a.hasPrev = true
-		a.prev = s
+	if n := len(a.history); n > 0 && !s.At.After(a.history[n-1].At) {
+		// Duplicate or out-of-order sample. Keep the current estimate rather
+		// than corrupting the regression with a non-monotonic time axis.
+		return
+	}
+	a.history = append(a.history, s)
+
+	// Drop anything that has fallen out of the window, always keeping at least
+	// two points so a slope remains computable.
+	cutoff := s.At.Add(-a.cfg.SlopeWindow)
+	drop := 0
+	for drop < len(a.history)-2 && a.history[drop].At.Before(cutoff) {
+		drop++
+	}
+	a.history = a.history[drop:]
+
+	if len(a.history) < 2 {
 		a.rateSlope = 0
 		return
 	}
-	dt := s.At.Sub(a.prev.At).Seconds()
-	if dt <= 0 {
-		// Duplicate or out-of-order sample. Keep the previous slope rather
-		// than dividing by zero or inventing a discontinuity.
+
+	// Least squares slope, with time measured relative to the first retained
+	// sample so the numbers stay small and well conditioned.
+	base := a.history[0].At
+	var sumT, sumR, sumTT, sumTR float64
+	n := float64(len(a.history))
+	for _, h := range a.history {
+		t := h.At.Sub(base).Seconds()
+		sumT += t
+		sumR += h.ArrivalRate
+		sumTT += t * t
+		sumTR += t * h.ArrivalRate
+	}
+	denom := n*sumTT - sumT*sumT
+	if denom == 0 {
+		// Every retained sample shares a timestamp, so no slope is defined.
+		a.rateSlope = 0
 		return
 	}
-	a.rateSlope = (s.ArrivalRate - a.prev.ArrivalRate) / dt
-	a.prev = s
+	a.rateSlope = (n*sumTR - sumT*sumR) / denom
 }
 
 func (a *Autoscaler) clamp(replicas int) int {
@@ -230,7 +291,7 @@ func (a *Autoscaler) applyStabilization(now time.Time, replicas int) int {
 
 // Reset clears all history. Used by tests and on leader election changeover.
 func (a *Autoscaler) Reset() {
-	a.hasPrev = false
+	a.history = nil
 	a.rateSlope = 0
 	a.peak = 0
 	a.peakAt = time.Time{}
