@@ -59,10 +59,21 @@ type Fleet interface {
 	Hosts() []scheduler.HostSnapshot
 }
 
+// HostRegistry is the membership side of the API, which vmhostd agents drive
+// by registering themselves and heartbeating. Optional: when nil, the host
+// endpoints are not served, which is what the simulation and the handler tests
+// want.
+type HostRegistry interface {
+	Register(id scheduler.HostID, capacity int) error
+	Heartbeat(id scheduler.HostID) error
+	Deregister(id scheduler.HostID) error
+}
+
 // Server wires the placement service to HTTP.
 type Server struct {
 	placer  Placer
 	fleet   Fleet
+	hosts   HostRegistry
 	metrics *metrics.Metrics
 	log     *slog.Logger
 	reg     *prometheus.Registry
@@ -76,6 +87,12 @@ func New(placer Placer, fleet Fleet, m *metrics.Metrics, reg *prometheus.Registr
 	return &Server{placer: placer, fleet: fleet, metrics: m, log: log, reg: reg}
 }
 
+// WithHostRegistry enables the host membership endpoints.
+func (s *Server) WithHostRegistry(hosts HostRegistry) *Server {
+	s.hosts = hosts
+	return s
+}
+
 // Routes returns the HTTP handler for the whole API.
 func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
@@ -84,10 +101,65 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /v1/hosts", s.handleListHosts)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	if s.hosts != nil {
+		mux.HandleFunc("POST /v1/hosts", s.handleRegisterHost)
+		mux.HandleFunc("POST /v1/hosts/{id}/heartbeat", s.handleHeartbeatHost)
+		mux.HandleFunc("DELETE /v1/hosts/{id}", s.handleDeregisterHost)
+	}
 	if s.reg != nil {
 		mux.Handle("GET /metrics", promhttp.HandlerFor(s.reg, promhttp.HandlerOpts{}))
 	}
 	return mux
+}
+
+// RegisterHostRequest is the POST /v1/hosts body, sent by a vmhostd on startup.
+type RegisterHostRequest struct {
+	// ID is the pod name in the cluster, or any stable identifier locally.
+	ID string `json:"id"`
+	// Capacity is how many microVM slots the agent is offering. It must be at
+	// least scheduler.MinSlotsPerHost.
+	Capacity int `json:"capacity"`
+}
+
+func (s *Server) handleRegisterHost(w http.ResponseWriter, r *http.Request) {
+	var req RegisterHostRequest
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
+		return
+	}
+	if err := s.hosts.Register(scheduler.HostID(req.ID), req.Capacity); err != nil {
+		if errors.Is(err, scheduler.ErrInvalidCapacity) {
+			s.writeError(w, http.StatusBadRequest, "invalid_capacity", err.Error())
+			return
+		}
+		s.writeError(w, http.StatusBadRequest, "registration_failed", err.Error())
+		return
+	}
+	s.log.Info("vmhost registered", "host", req.ID, "capacity", req.Capacity)
+	s.writeJSON(w, http.StatusCreated, map[string]any{"id": req.ID, "capacity": req.Capacity})
+}
+
+func (s *Server) handleHeartbeatHost(w http.ResponseWriter, r *http.Request) {
+	if err := s.hosts.Heartbeat(scheduler.HostID(r.PathValue("id"))); err != nil {
+		// A heartbeat from a host we have forgotten, for example after the
+		// placement API restarted. 404 tells the agent to register again
+		// rather than keep heartbeating into the void.
+		s.writeError(w, http.StatusNotFound, "unknown_host", err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleDeregisterHost(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.hosts.Deregister(scheduler.HostID(id)); err != nil {
+		s.writeError(w, http.StatusNotFound, "unknown_host", err.Error())
+		return
+	}
+	s.log.Info("vmhost deregistered", "host", id)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // CreateVMRequest is the POST /v1/vms body.
