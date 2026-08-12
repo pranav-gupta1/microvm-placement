@@ -1,0 +1,54 @@
+# Build output
+/bin/
+/dist/
+*.exe
+
+# Go test and profiling artifacts
+*.test
+*.out
+coverage.html
+
+# Terraform state holds infrastructure detail and can hold secrets. It must
+# never be committed; the backend is remote.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+# Variable files routinely carry account IDs and CIDRs. The checked-in example
+# is the documented interface instead.
+*.tfvars
+*.tfvars.json
+!example.tfvars
+
+# Credentials, keys, kubeconfigs. Belt and braces: nothing here should exist.
+*.pem
+*.key
+.env
+.env.*
+kubeconfig
+kubeconfig.*
+
+# Guest kernel and root filesystem images are large build artifacts, rebuilt by
+# images/Makefile rather than tracked.
+/images/build/
+*.img
+*.ext4
+vmlinux*
+
+# Load run output
+/results/
+*.jsonl
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

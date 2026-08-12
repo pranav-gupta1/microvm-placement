@@ -1,0 +1,46 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - bodyclose      # a leaked response body at 1000 RPS exhausts sockets fast
+    - errorlint      # we rely on errors.Is for control flow
+    - gosec
+    - misspell
+    - nilerr
+    - revive
+    - unconvert
+    - unparam
+    - wastedassign
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+        - name: package-comments
+    gosec:
+      excludes:
+        # Load generation and jitter are not cryptographic. Reproducible seeded
+        # sampling is a requirement here, not a weakness.
+        - G404
+
+  exclusions:
+    rules:
+      # Test helpers legitimately ignore errors on cleanup paths.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
