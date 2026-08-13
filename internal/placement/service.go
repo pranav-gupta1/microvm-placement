@@ -40,6 +40,9 @@ var (
 	ErrQueueFull = errors.New("placement: admission queue full")
 	// ErrShuttingDown means the service stopped while the request was waiting.
 	ErrShuttingDown = errors.New("placement: service is shutting down")
+	// ErrBootFailed means a host was chosen but the guest would not start on
+	// it, on every host tried.
+	ErrBootFailed = errors.New("placement: microVM failed to boot")
 )
 
 // Defaults for the admission path, derived in docs/capacity-planning.md.
@@ -125,18 +128,32 @@ type Stats struct {
 	TimedOut        uint64
 	QueueRejected   uint64
 	Released        uint64
+	BootFailed      uint64
 	CurrentQueueLen int
 	MaxQueueLen     uint64
 }
 
 // Dropped is the number of requests that never got a placement. The objective
 // requires this to be zero.
-func (s Stats) Dropped() uint64 { return s.TimedOut + s.QueueRejected }
+func (s Stats) Dropped() uint64 { return s.TimedOut + s.QueueRejected + s.BootFailed }
+
+// Booter starts a microVM on the host the scheduler chose.
+//
+// It is separate from the scheduler because placing and booting fail in
+// different ways and at different speeds: placement is a bookkeeping decision
+// costing hundreds of nanoseconds, while booting is a network call to another
+// pod that may be slow, may fail, and may reveal that the scheduler's view of
+// that host was stale.
+type Booter interface {
+	Boot(ctx context.Context, host scheduler.HostID, vmID string, ttl time.Duration) error
+}
 
 // Service admits placement requests and assigns them to hosts.
 type Service struct {
 	cfg   Config
 	sched *scheduler.Scheduler
+
+	booter Booter
 
 	queue chan *pending
 	// freed carries capacity-release notifications. It is depth 1 and sent to
@@ -152,6 +169,7 @@ type Service struct {
 	timedOut      atomic.Uint64
 	queueRejected atomic.Uint64
 	released      atomic.Uint64
+	bootFailed    atomic.Uint64
 	maxQueueLen   atomic.Uint64
 }
 
@@ -187,6 +205,19 @@ func New(sched *scheduler.Scheduler, cfg Config) (*Service, error) {
 		done:    make(chan struct{}),
 	}, nil
 }
+
+// WithBooter attaches a Booter. Without one the service only does bookkeeping,
+// which is what the simulation and the unit tests want.
+func (s *Service) WithBooter(b Booter) *Service {
+	s.booter = b
+	return s
+}
+
+// maxBootAttempts bounds how many hosts a single request will try before
+// giving up. A boot rejected because the host is already full means the
+// scheduler's view was stale, and the right response is to place elsewhere,
+// but retrying forever would let one request monopolise the dispatcher.
+const maxBootAttempts = 3
 
 // Start runs the dispatcher until ctx is cancelled or Stop is called.
 //
@@ -281,8 +312,56 @@ func (s *Service) Admit(ctx context.Context, req Request) (Result, error) {
 	if res.err != nil {
 		return Result{}, res.err
 	}
+
+	// Boot happens here, in the caller's goroutine, deliberately outside the
+	// dispatcher. The dispatcher is serialised to keep admission strictly FIFO,
+	// and a boot is a network round trip to another pod; doing it inline would
+	// cap the whole system at one boot at a time, which at a 25 ms boot is
+	// about 40 requests per second rather than the 1000 required.
+	host := res.host
+	attempts := res.attempts
+	if s.booter != nil {
+		var err error
+		host, attempts, err = s.bootWithRetry(ctx, p, host, attempts)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+
 	s.placed.Add(1)
-	return Result{Host: res.host, Wait: time.Since(p.enqueued), Attempts: res.attempts}, nil
+	return Result{Host: host, Wait: time.Since(p.enqueued), Attempts: attempts}, nil
+}
+
+// bootWithRetry starts the guest, re-placing onto another host if the chosen
+// one turns out to be full.
+func (s *Service) bootWithRetry(ctx context.Context, p *pending, host scheduler.HostID, attempts int) (scheduler.HostID, int, error) {
+	for i := 0; ; i++ {
+		err := s.booter.Boot(ctx, host, p.req.VMID, p.req.TTL)
+		if err == nil {
+			return host, attempts, nil
+		}
+
+		// The slot was reserved for a guest that never started, so give it back
+		// before trying anywhere else. Failing to do this is how a fleet leaks
+		// capacity one failed boot at a time.
+		_ = s.sched.Release(scheduler.VMID(p.req.VMID))
+		s.signalCapacity()
+
+		if i+1 >= maxBootAttempts || p.ctx.Err() != nil {
+			s.bootFailed.Add(1)
+			return "", attempts, fmt.Errorf("%w: %w", ErrBootFailed, err)
+		}
+
+		// Place again. The scheduler will pick a different host, since the one
+		// that just rejected us is now recorded as full.
+		next, perr := s.sched.Place(scheduler.VMID(p.req.VMID))
+		if perr != nil {
+			s.bootFailed.Add(1)
+			return "", attempts, fmt.Errorf("%w: %w", ErrBootFailed, err)
+		}
+		host = next
+		attempts++
+	}
 }
 
 // recordQueueDepth tracks the high-water mark, which tells us after a run
@@ -380,6 +459,7 @@ func (s *Service) Stats() Stats {
 		TimedOut:        s.timedOut.Load(),
 		QueueRejected:   s.queueRejected.Load(),
 		Released:        s.released.Load(),
+		BootFailed:      s.bootFailed.Load(),
 		CurrentQueueLen: len(s.queue),
 		MaxQueueLen:     s.maxQueueLen.Load(),
 	}

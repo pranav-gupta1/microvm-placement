@@ -52,6 +52,8 @@ type options struct {
 	admissionDeadline time.Duration
 	sampleInterval    time.Duration
 	heartbeatTimeout  time.Duration
+	bootTimeout       time.Duration
+	maxConns          int
 	logLevel          string
 }
 
@@ -70,6 +72,8 @@ func parseFlags() *options {
 	flag.DurationVar(&o.admissionDeadline, "admission-deadline", placement.DefaultAdmissionDeadline, "how long a request may wait for capacity")
 	flag.DurationVar(&o.sampleInterval, "sample-interval", time.Second, "how often the autoscaling signal is recomputed")
 	flag.DurationVar(&o.heartbeatTimeout, "heartbeat-timeout", registry.DefaultHeartbeatTimeout, "how long a vmhost may go silent before it is drained")
+	flag.DurationVar(&o.bootTimeout, "boot-timeout", time.Second, "per-attempt timeout calling a vmhost agent to boot a guest")
+	flag.IntVar(&o.maxConns, "max-agent-conns", 512, "connection pool size for agent calls")
 	flag.StringVar(&o.logLevel, "log-level", "info", "debug, info, warn or error")
 	flag.Parse()
 	return o
@@ -121,6 +125,11 @@ func run() error {
 	// deletion.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Booting is what turns a placement into a running guest. Its timeout is
+	// kept below the admission deadline so a slow agent surfaces as a retry
+	// onto another host rather than consuming the caller's whole budget.
+	svc.WithBooter(newHTTPBooter(reggy, o.bootTimeout, o.maxConns))
 
 	svc.Start(ctx)
 	defer svc.Stop()
