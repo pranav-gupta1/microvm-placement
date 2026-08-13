@@ -58,10 +58,47 @@ type Spec struct {
 	TTL time.Duration
 }
 
+// maxIDLen bounds the identifier so it cannot overflow a kernel command line
+// or produce an unwieldy jailer directory name.
+const maxIDLen = 128
+
+// validIDChar reports whether c is allowed in a microVM identifier.
+//
+// The character set is restrictive on purpose. A microVM ID reaches two places
+// where a loose one would be dangerous: the guest kernel command line, where
+// whitespace would let a caller append arbitrary kernel parameters such as
+// init=/bin/sh, and the filesystem, where a path separator or ".." would let it
+// escape the jailer's chroot. Neither is reachable through this project's fixed
+// request shape today, but the constraint belongs on the type rather than in
+// the memory of whoever next adds a hypervisor.
+func validIDChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '-', c == '_', c == '.':
+		return true
+	default:
+		return false
+	}
+}
+
 // Validate reports whether the spec is usable.
 func (s Spec) Validate() error {
 	if s.ID == "" {
 		return fmt.Errorf("spec: ID must not be empty")
+	}
+	if len(s.ID) > maxIDLen {
+		return fmt.Errorf("spec: ID must be at most %d bytes, got %d", maxIDLen, len(s.ID))
+	}
+	for i := 0; i < len(s.ID); i++ {
+		if !validIDChar(s.ID[i]) {
+			return fmt.Errorf("spec: ID contains disallowed byte %q at offset %d, want only letters, digits, dash, underscore or dot", s.ID[i], i)
+		}
+	}
+	// Leading dots would produce hidden files and, combined with a second dot,
+	// a parent-directory reference.
+	if s.ID[0] == '.' {
+		return fmt.Errorf("spec: ID must not begin with a dot")
 	}
 	if s.VCPUs < 1 {
 		return fmt.Errorf("spec: VCPUs must be at least 1, got %d", s.VCPUs)

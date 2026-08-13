@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -392,5 +393,53 @@ func TestBootLatencyStaysWithinTheConfiguredBand(t *testing.T) {
 	// hide the queueing effects this model exists to reproduce.
 	if !sawBelow || !sawAbove {
 		t.Error("boot latency did not vary on both sides of the mean")
+	}
+}
+
+// TestSpecValidateRejectsDangerousIDs guards the two places a microVM
+// identifier escapes into something that interprets it: the guest kernel
+// command line, and the filesystem path a jailer builds. Neither is reachable
+// through this project's fixed request shape, but the constraint belongs on the
+// type rather than in the memory of whoever adds the next hypervisor.
+func TestSpecValidateRejectsDangerousIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+	}{
+		// Whitespace would let a caller append arbitrary kernel parameters.
+		{"kernel parameter injection", "vm1 init=/bin/sh"},
+		{"tab", "vm1\tinit=/bin/sh"},
+		{"newline", "vm1\ninit=/bin/sh"},
+		// Path traversal out of a jailer chroot.
+		{"path separator", "../../etc/passwd"},
+		{"parent reference", ".."},
+		{"leading dot", ".hidden"},
+		// Shell metacharacters. No shell is involved, but allowing them is
+		// asking for trouble the first time one is.
+		{"semicolon", "vm1;rm -rf /"},
+		{"backtick", "vm1`whoami`"},
+		{"dollar", "vm1$(id)"},
+		{"null byte", "vm1\x00"},
+		{"too long", strings.Repeat("a", 129)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := Spec{ID: tc.id, VCPUs: 1, MemMiB: 1024}
+			if err := spec.Validate(); err == nil {
+				t.Errorf("Validate() accepted dangerous id %q", tc.id)
+			}
+		})
+	}
+
+	// Everything the system actually generates must still be accepted:
+	// UUIDs from the API and vm-<n> from the load generator.
+	for _, id := range []string{
+		"vm-123",
+		"3f2504e0-4f89-11d3-9a0c-0305e82c3301",
+		"vmhost-0.slot_7",
+	} {
+		if err := (Spec{ID: id, VCPUs: 1, MemMiB: 1024}).Validate(); err != nil {
+			t.Errorf("Validate() rejected legitimate id %q: %v", id, err)
+		}
 	}
 }
