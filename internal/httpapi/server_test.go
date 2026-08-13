@@ -58,8 +58,6 @@ func newTestServer(t *testing.T, p Placer, f Fleet) (http.Handler, *metrics.Metr
 	t.Helper()
 	reg := prometheus.NewRegistry()
 	m := metrics.New(reg)
-	// Discard handler logs: the error paths below log deliberately and would
-	// otherwise bury the real test output.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	return New(p, f, m, reg, log).Routes(), m, reg
 }
@@ -141,7 +139,6 @@ func TestCreateVMWithEmptyBodyUsesDefaults(t *testing.T) {
 	if got.TTLMillis != DefaultTTL.Milliseconds() {
 		t.Errorf("TTLMillis = %d, want %d", got.TTLMillis, DefaultTTL.Milliseconds())
 	}
-	// An empty body must still produce a usable identifier.
 	if got.ID == "" {
 		t.Error("ID is empty, want a generated identifier")
 	}
@@ -168,8 +165,6 @@ func TestCreateVMRejectsInvalidRequests(t *testing.T) {
 		name string
 		body string
 	}{
-		// The guest shape is fixed. Accepting other shapes would silently
-		// invalidate the scheduler's slot accounting.
 		{"wrong vcpus", `{"vcpus":4}`},
 		{"wrong memory", `{"memory_mib":2048}`},
 		{"negative ttl", `{"ttl_ms":-1}`},
@@ -189,8 +184,6 @@ func TestCreateVMRejectsInvalidRequests(t *testing.T) {
 			if len(p.admitted) != 0 {
 				t.Error("an invalid request reached the placement layer")
 			}
-			// A client error is not a dropped request and must not pollute
-			// the metric the objective is graded on.
 			for _, reason := range []string{metrics.DropReasonTimeout, metrics.DropReasonQueueFull} {
 				if v := counterValue(t, reg, "microvm_requests_dropped_total", map[string]string{"reason": reason}); v != 0 {
 					t.Errorf("drop counter %s = %v after a 400, want 0", reason, v)
@@ -219,8 +212,6 @@ func TestAdmissionFailuresMapTo503AndCountAsDrops(t *testing.T) {
 			if w.Code != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want 503", w.Code)
 			}
-			// Retry-After tells a well-behaved client to come back rather
-			// than hammer, which matters when capacity is already scarce.
 			if w.Header().Get("Retry-After") == "" {
 				t.Error("missing Retry-After header on a 503")
 			}
@@ -238,9 +229,7 @@ func TestAdmissionFailuresMapTo503AndCountAsDrops(t *testing.T) {
 	}
 }
 
-// TestDuplicateIDIsAConflictNotADrop keeps the drop metric trustworthy. A
-// client reusing an identifier is its own mistake, and counting it against the
-// zero-drop objective would make the number meaningless.
+// TestDuplicateIDIsAConflictNotADrop keeps the drop metric trustworthy.
 func TestDuplicateIDIsAConflictNotADrop(t *testing.T) {
 	p := &stubPlacer{admitErr: scheduler.ErrDuplicateVM}
 	h, _, reg := newTestServer(t, p, readyFleet())
@@ -318,9 +307,9 @@ func TestHealthzIgnoresFleetState(t *testing.T) {
 }
 
 // TestReadyzDoesNotDependOnFleetCapacity is a regression test for a deadlock
-// found on first deployment. vmhost agents register over this same server, so a
-// Service that withholds endpoints until hosts exist prevents the registrations
-// that would create them, and the rollout never completes.
+// found on first deployment. vmhost agents register over this same server, so
+// a Service that withholds endpoints until hosts exist prevents the
+// registrations that would create them, and the rollout never completes.
 func TestReadyzReflectsFleetCapacity(t *testing.T) {
 	t.Run("ready with an empty fleet", func(t *testing.T) {
 		h, _, _ := newTestServer(t, &stubPlacer{}, &stubFleet{stats: scheduler.Stats{Hosts: 3}})
@@ -374,9 +363,7 @@ func TestListHosts(t *testing.T) {
 }
 
 // TestMetricsEndpointExportsTheKEDASeries pins the contract between this
-// service and the autoscaling controller. If this series is renamed or
-// disappears, KEDA silently stops scaling, which is a failure that looks like
-// a capacity problem rather than a wiring problem.
+// service and the autoscaling controller.
 func TestMetricsEndpointExportsTheKEDASeries(t *testing.T) {
 	h, m, _ := newTestServer(t, &stubPlacer{}, readyFleet())
 	m.DesiredVMhostReplicas.Set(79)
@@ -401,9 +388,7 @@ func TestMetricsEndpointExportsTheKEDASeries(t *testing.T) {
 	}
 }
 
-// TestDropCountersStartAtZero matters for the dashboard. Without pre-created
-// label values, a drops panel renders "No data", which is visually identical
-// to a broken exporter at exactly the moment you need to trust the zero.
+// TestDropCountersStartAtZero matters for the dashboard.
 func TestDropCountersStartAtZero(t *testing.T) {
 	h, _, _ := newTestServer(t, &stubPlacer{}, readyFleet())
 

@@ -1,8 +1,4 @@
 # Grafana with the dashboard baked in, because the dashboard is the demo.
-#
-# Provisioned from a ConfigMap rather than clicked together in the UI, so the
-# panels are version controlled and a fresh cluster comes up showing the right
-# thing with no manual setup.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -55,9 +51,7 @@ spec:
         - name: grafana
           image: grafana/grafana:11.5.1
           env:
-            # Anonymous admin. This is a local demo cluster with disposable
-            # data and no ingress; a login screen would only be something to
-            # fumble through on camera.
+            # Anonymous admin.
             - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}
             - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: "Admin"}
             - {name: GF_AUTH_DISABLE_LOGIN_FORM, value: "true"}

@@ -73,7 +73,6 @@ func TestNewValidation(t *testing.T) {
 	if _, err := New(sched, nil, Config{SweepInterval: -time.Second}); err == nil {
 		t.Error("New() with negative sweep interval error = nil, want non-nil")
 	}
-	// Zero config is valid and takes the defaults.
 	if _, err := New(sched, nil, Config{}); err != nil {
 		t.Errorf("New() with defaults error = %v", err)
 	}
@@ -91,7 +90,6 @@ func TestRegisterMakesAHostImmediatelyPlaceable(t *testing.T) {
 	if _, err := sched.Place("vm-1"); err != nil {
 		t.Errorf("Place() error = %v, want a registered host to be placeable", err)
 	}
-	// Registration is the event a queued request has been waiting for.
 	if notifier.count() != 1 {
 		t.Errorf("capacity signals = %d, want 1", notifier.count())
 	}
@@ -109,16 +107,13 @@ func TestRegisterRejectsCapacityBelowTheTwoVMFloor(t *testing.T) {
 	if err := r.Register("vmhost-0", 1, "10.0.0.1:9090"); !errors.Is(err, scheduler.ErrInvalidCapacity) {
 		t.Errorf("Register(capacity=1) error = %v, want ErrInvalidCapacity", err)
 	}
-	// A rejected registration must not leave the host tracked, or the sweeper
-	// would later try to drain something that was never added.
 	if r.Tracked() != 0 {
 		t.Errorf("Tracked() = %d after a rejected registration, want 0", r.Tracked())
 	}
 }
 
-// TestRepeatedRegistrationIsIdempotent covers the agent restarting in place and
-// the case where its first response was lost. Either would double-add a host if
-// registration were not idempotent.
+// TestRepeatedRegistrationIsIdempotent covers the agent restarting in place
+// and the case where its first response was lost.
 func TestRepeatedRegistrationIsIdempotent(t *testing.T) {
 	r, sched, _, _ := newRegistry(t)
 
@@ -138,7 +133,6 @@ func TestHeartbeatKeepsAHostAlive(t *testing.T) {
 		t.Fatalf("Register() error = %v", err)
 	}
 
-	// Heartbeat steadily across more than a full timeout of elapsed time.
 	for i := 0; i < 6; i++ {
 		clock.advance(2 * time.Second)
 		if err := r.Heartbeat("vmhost-0"); err != nil {
@@ -160,9 +154,7 @@ func TestHeartbeatFromUnknownHost(t *testing.T) {
 	}
 }
 
-// TestSilentHostIsDrainedNotDeleted is the important one. A wedged vmhostd may
-// still have live microVMs, so eviction must drain rather than delete, or those
-// microVMs would be orphaned and their slots leaked.
+// TestSilentHostIsDrainedNotDeleted is the important one.
 func TestSilentHostIsDrainedNotDeleted(t *testing.T) {
 	r, sched, clock, _ := newRegistry(t)
 	if err := r.Register("vmhost-0", 8, "10.0.0.1:9090"); err != nil {
@@ -184,11 +176,9 @@ func TestSilentHostIsDrainedNotDeleted(t *testing.T) {
 	if hosts[0].State != scheduler.HostDraining {
 		t.Errorf("state = %s, want Draining", hosts[0].State)
 	}
-	// The microVM must still resolve, not have been orphaned.
 	if _, ok := sched.HostOf("vm-1"); !ok {
 		t.Error("the microVM was orphaned by eviction")
 	}
-	// And a drained host must take no new work.
 	if _, err := sched.Place("vm-2"); !errors.Is(err, scheduler.ErrNoCapacity) {
 		t.Errorf("Place() onto a drained host error = %v, want ErrNoCapacity", err)
 	}
@@ -206,12 +196,10 @@ func TestDrainedHostIsRemovedOnceEmpty(t *testing.T) {
 	clock.advance(10 * time.Second)
 	r.Sweep()
 
-	// Still holding a microVM, so it stays.
 	if len(sched.Hosts()) != 1 {
 		t.Fatalf("host was removed while still holding a microVM")
 	}
 
-	// Its last microVM exits, and the next sweep reclaims it.
 	if err := sched.Release("vm-1"); err != nil {
 		t.Fatalf("Release() error = %v", err)
 	}
@@ -234,7 +222,6 @@ func TestDeregisterDrainsGracefully(t *testing.T) {
 	if err := r.Deregister("vmhost-0"); err != nil {
 		t.Fatalf("Deregister() error = %v", err)
 	}
-	// A clean shutdown must let existing microVMs finish.
 	if _, ok := sched.HostOf("vm-1"); !ok {
 		t.Error("Deregister orphaned a running microVM")
 	}

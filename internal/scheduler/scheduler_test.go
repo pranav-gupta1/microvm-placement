@@ -9,9 +9,6 @@ import (
 )
 
 // checkInvariants asserts the internal consistency the whole design rests on.
-// It runs after every mutation in the property test below, so a bug in bucket
-// bookkeeping surfaces at the operation that caused it rather than as a wrong
-// placement thousands of operations later.
 func (s *Scheduler) checkInvariants(t *testing.T) {
 	t.Helper()
 	s.mu.Lock()
@@ -27,8 +24,6 @@ func (s *Scheduler) checkInvariants(t *testing.T) {
 		}
 		totalUsed += h.used
 
-		// A ready host belongs to exactly the bucket matching its free slots.
-		// Anything else is either unreachable capacity or a double booking.
 		for k := range s.buckets {
 			present := s.buckets[k].contains(id)
 			want := h.state == HostReady && k == h.free()
@@ -54,7 +49,6 @@ func (s *Scheduler) checkInvariants(t *testing.T) {
 		t.Fatalf("%d hosts across buckets but %d hosts are ready", bucketed, readyCount)
 	}
 
-	// Every assignment must name a host that still exists.
 	for vm, id := range s.assigned {
 		if _, ok := s.hosts[id]; !ok {
 			t.Fatalf("microVM %s is assigned to unknown host %s", vm, id)
@@ -62,7 +56,8 @@ func (s *Scheduler) checkInvariants(t *testing.T) {
 	}
 }
 
-// readyFleet builds n ready hosts of the given capacity, named host-0..host-n-1.
+// readyFleet builds n ready hosts of the given capacity, named
+// host-0..host-n-1.
 func readyFleet(t *testing.T, s *Scheduler, n, capacity int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
@@ -90,8 +85,6 @@ func usageHistogram(s *Scheduler) []int {
 
 func TestAddHostRejectsCapacityBelowMinimum(t *testing.T) {
 	s := New(BestFit)
-	// The assignment requires at least two microVMs per pod, so a one-slot
-	// host is a configuration error we refuse rather than quietly honour.
 	for _, capacity := range []int{-1, 0, 1} {
 		err := s.AddHost(HostID(fmt.Sprintf("h%d", capacity)), capacity)
 		if !errors.Is(err, ErrInvalidCapacity) {
@@ -118,7 +111,6 @@ func TestPendingHostsAreNotPlaceable(t *testing.T) {
 	if err := s.AddHost("h1", 4); err != nil {
 		t.Fatalf("AddHost() error = %v", err)
 	}
-	// A pod that exists but has not passed readiness must not receive traffic.
 	if _, err := s.Place("vm-1"); !errors.Is(err, ErrNoCapacity) {
 		t.Fatalf("Place() on pending host error = %v, want ErrNoCapacity", err)
 	}
@@ -140,9 +132,6 @@ func TestBestFitPacksOntoTheFullestHost(t *testing.T) {
 	s := New(BestFit)
 	readyFleet(t, s, 3, 4)
 
-	// Five microVMs across three four-slot hosts. Best fit fills one host
-	// completely before touching the next, so exactly one host should be left
-	// entirely empty and therefore reclaimable.
 	for i := 0; i < 5; i++ {
 		if _, err := s.Place(VMID(fmt.Sprintf("vm-%d", i))); err != nil {
 			t.Fatalf("Place(vm-%d) error = %v", i, err)
@@ -173,9 +162,6 @@ func TestWorstFitSpreadsAndStrandsCapacity(t *testing.T) {
 	}
 	s.checkInvariants(t)
 
-	// This is the case against spreading, stated as an assertion. The same
-	// five microVMs now touch every host, so nothing can be scaled away even
-	// though the fleet is only 42% utilised.
 	if got, want := usageHistogram(s), []int{2, 2, 1}; !equalInts(got, want) {
 		t.Errorf("usage histogram = %v, want %v", got, want)
 	}
@@ -200,8 +186,6 @@ func TestReleaseReturnsSlotsAndEmptiesHosts(t *testing.T) {
 		t.Fatalf("usage histogram = %v, want %v", got, want)
 	}
 
-	// Draining the two microVMs off the second host should return it to idle,
-	// which is exactly the transition scale-down depends on.
 	for _, vm := range placed[4:] {
 		if err := s.Release(vm); err != nil {
 			t.Fatalf("Release(%s) error = %v", vm, err)
@@ -230,11 +214,9 @@ func TestDrainingHostKeepsItsVMsButTakesNoNewOnes(t *testing.T) {
 	}
 	s.checkInvariants(t)
 
-	// Existing placement survives the transition.
 	if got, ok := s.HostOf("vm-0"); !ok || got != first {
 		t.Errorf("HostOf(vm-0) = %s, %v, want %s, true", got, ok, first)
 	}
-	// New placements avoid it entirely, letting it reach zero and go away.
 	for i := 1; i <= 4; i++ {
 		got, err := s.Place(VMID(fmt.Sprintf("vm-%d", i)))
 		if err != nil {
@@ -244,7 +226,6 @@ func TestDrainingHostKeepsItsVMsButTakesNoNewOnes(t *testing.T) {
 			t.Fatalf("Place(vm-%d) landed on draining host %s", i, first)
 		}
 	}
-	// The remaining ready host has four slots and now holds all four.
 	if _, err := s.Place("vm-5"); !errors.Is(err, ErrNoCapacity) {
 		t.Errorf("Place() with only a draining host free, error = %v, want ErrNoCapacity", err)
 	}
@@ -263,7 +244,6 @@ func TestPlaceReturnsErrNoCapacityWhenFull(t *testing.T) {
 	if _, err := s.Place("vm-overflow"); !errors.Is(err, ErrNoCapacity) {
 		t.Errorf("Place() when full error = %v, want ErrNoCapacity", err)
 	}
-	// A failed placement must not have consumed anything.
 	s.checkInvariants(t)
 	if stats := s.Stats(); stats.InflightVMs != 4 {
 		t.Errorf("InflightVMs = %d, want 4", stats.InflightVMs)
@@ -280,7 +260,6 @@ func TestPlaceRejectsDuplicateVM(t *testing.T) {
 	if _, err := s.Place("vm-1"); !errors.Is(err, ErrDuplicateVM) {
 		t.Errorf("Place() duplicate error = %v, want ErrDuplicateVM", err)
 	}
-	// The rejected duplicate must not have burned a second slot.
 	if stats := s.Stats(); stats.Used != 1 {
 		t.Errorf("Used = %d, want 1", stats.Used)
 	}
@@ -313,7 +292,6 @@ func TestRemoveHostReportsOrphanedVMs(t *testing.T) {
 			t.Fatalf("Place(vm-%d) error = %v", i, err)
 		}
 	}
-	// Best fit filled host-1 first, so removing it should orphan four microVMs.
 	orphaned, err := s.RemoveHost("host-1")
 	if err != nil {
 		t.Fatalf("RemoveHost() error = %v", err)
@@ -323,7 +301,6 @@ func TestRemoveHostReportsOrphanedVMs(t *testing.T) {
 	}
 	s.checkInvariants(t)
 
-	// The orphans must no longer resolve to any host.
 	for _, vm := range orphaned {
 		if _, ok := s.HostOf(vm); ok {
 			t.Errorf("HostOf(%s) still resolves after host removal", vm)
@@ -338,7 +315,6 @@ func TestStatsTracksIdleAndUnderfilledHosts(t *testing.T) {
 	s := New(BestFit)
 	readyFleet(t, s, 4, 4)
 
-	// One host full, one holding a single microVM, two untouched.
 	for i := 0; i < 5; i++ {
 		if _, err := s.Place(VMID(fmt.Sprintf("vm-%d", i))); err != nil {
 			t.Fatalf("Place(vm-%d) error = %v", i, err)
@@ -351,8 +327,6 @@ func TestStatsTracksIdleAndUnderfilledHosts(t *testing.T) {
 	if stats.IdleHosts != 2 {
 		t.Errorf("IdleHosts = %d, want 2", stats.IdleHosts)
 	}
-	// One host runs a single microVM, which the assignment's two-per-pod floor
-	// treats as underfilled.
 	if stats.UnderfilledHosts != 1 {
 		t.Errorf("UnderfilledHosts = %d, want 1", stats.UnderfilledHosts)
 	}
@@ -369,7 +343,6 @@ func TestStatsUtilisationWithNoCapacity(t *testing.T) {
 }
 
 func TestHostStateAndPolicyStrings(t *testing.T) {
-	// These strings end up in logs and metric labels, so pin them.
 	if got, want := HostReady.String(), "Ready"; got != want {
 		t.Errorf("HostReady.String() = %q, want %q", got, want)
 	}
@@ -390,8 +363,6 @@ func TestHostStateAndPolicyStrings(t *testing.T) {
 func TestSetHostStateToSameStateIsANoop(t *testing.T) {
 	s := New(BestFit)
 	readyFleet(t, s, 1, 4)
-	// Repeated readiness events from the informer are normal. They must not
-	// double-insert the host into its bucket.
 	for i := 0; i < 3; i++ {
 		if err := s.SetHostState("host-0", HostReady); err != nil {
 			t.Fatalf("SetHostState() error = %v", err)
@@ -484,7 +455,6 @@ func TestSchedulerInvariantsUnderRandomOperations(t *testing.T) {
 			case err == nil:
 				live[vm] = struct{}{}
 			case errors.Is(err, ErrNoCapacity):
-				// Legitimate: the fleet is genuinely full.
 			default:
 				t.Fatalf("op %d: Place(%s) unexpected error = %v", i, vm, err)
 			}
@@ -493,15 +463,14 @@ func TestSchedulerInvariantsUnderRandomOperations(t *testing.T) {
 		s.checkInvariants(t)
 	}
 
-	// The test is only meaningful if it actually exercised placement.
 	if nextVM < 1000 {
 		t.Fatalf("only attempted %d placements, the random walk is not exercising the scheduler", nextVM)
 	}
 }
 
-// TestBestFitLeavesMoreHostsIdleThanWorstFit is the design decision expressed as
-// a measurement: under identical load, best fit must leave strictly more hosts
-// empty, because empty hosts are the only ones that can be scaled away.
+// TestBestFitLeavesMoreHostsIdleThanWorstFit is the design decision expressed
+// as a measurement: under identical load, best fit must leave strictly more
+// hosts empty, because empty hosts are the only ones that can be scaled away.
 func TestBestFitLeavesMoreHostsIdleThanWorstFit(t *testing.T) {
 	const (
 		hosts    = 20
@@ -520,8 +489,6 @@ func TestBestFitLeavesMoreHostsIdleThanWorstFit(t *testing.T) {
 	}
 
 	best, worst := idleUnder(BestFit), idleUnder(WorstFit)
-	// Best fit needs ceil(40/8) = 5 hosts, leaving 15 idle. Worst fit touches
-	// every host, leaving none.
 	if best != 15 {
 		t.Errorf("BestFit left %d hosts idle, want 15", best)
 	}
@@ -545,9 +512,8 @@ func equalInts(a, b []int) bool {
 	return true
 }
 
-// BenchmarkPlaceRelease measures the hot path at the fleet size the system runs
-// at peak: about 79 hosts of 8 slots. Placement must stay far below the
-// per-request budget at 1000 requests per second.
+// BenchmarkPlaceRelease measures the hot path at the fleet size the system
+// runs at peak: about 79 hosts of 8 slots.
 func BenchmarkPlaceRelease(b *testing.B) {
 	const (
 		hosts    = 80

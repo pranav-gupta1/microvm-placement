@@ -93,19 +93,16 @@ func TestAdmitRejectsEmptyVMID(t *testing.T) {
 }
 
 // TestAdmitWaitsForCapacityRatherThanDropping is the assignment's central
-// requirement expressed as a test. The fleet is full when the request arrives,
-// so a naive implementation would return 503. This one must wait and succeed.
+// requirement expressed as a test.
 func TestAdmitWaitsForCapacityRatherThanDropping(t *testing.T) {
 	svc, _ := newService(t, 1, 2, Config{AdmissionDeadline: 2 * time.Second})
 
-	// Fill every slot.
 	for i := 0; i < 2; i++ {
 		if _, err := svc.Admit(context.Background(), Request{VMID: fmt.Sprintf("vm-%d", i)}); err != nil {
 			t.Fatalf("Admit(vm-%d) error = %v", i, err)
 		}
 	}
 
-	// Free one slot shortly after the next request starts waiting.
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		if err := svc.Release("vm-0"); err != nil {
@@ -129,9 +126,8 @@ func TestAdmitWaitsForCapacityRatherThanDropping(t *testing.T) {
 	}
 }
 
-// TestReleaseWakesAWaiterPromptly checks that retries are driven by the release
-// signal, not by the fallback poll. A long retry interval makes the difference
-// observable: if the waiter were polling, it could not return this fast.
+// TestReleaseWakesAWaiterPromptly checks that retries are driven by the
+// release signal, not by the fallback poll.
 func TestReleaseWakesAWaiterPromptly(t *testing.T) {
 	svc, _ := newService(t, 1, 2, Config{
 		AdmissionDeadline: 5 * time.Second,
@@ -159,7 +155,6 @@ func TestReleaseWakesAWaiterPromptly(t *testing.T) {
 
 	select {
 	case elapsed := <-done:
-		// Woken by the signal, so far below the 3 second poll interval.
 		if elapsed > time.Second {
 			t.Errorf("waiter took %s, expected the release signal to wake it promptly", elapsed)
 		}
@@ -179,8 +174,6 @@ func TestAdmitTimesOutWhenCapacityNeverArrives(t *testing.T) {
 		}
 	}
 
-	// Nothing is ever released, so this must eventually give up rather than
-	// block forever.
 	if _, err := svc.Admit(context.Background(), Request{VMID: "vm-doomed"}); !errors.Is(err, ErrAdmissionTimeout) {
 		t.Errorf("Admit() error = %v, want ErrAdmissionTimeout", err)
 	}
@@ -201,8 +194,6 @@ func TestCallerContextCancellationIsHonoured(t *testing.T) {
 		}
 	}
 
-	// A caller that gives up early must not be held for the full service
-	// deadline.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
 
@@ -216,9 +207,7 @@ func TestCallerContextCancellationIsHonoured(t *testing.T) {
 }
 
 // TestNoSlotIsLeakedWhenAdmissionTimesOut guards the race that motivated
-// letting the dispatcher be the sole authority on a request's outcome. If a
-// timeout could be reported for a request that was in fact placed, the slot
-// would never be released and the fleet would leak capacity under load.
+// letting the dispatcher be the sole authority on a request's outcome.
 func TestNoSlotIsLeakedWhenAdmissionTimesOut(t *testing.T) {
 	const (
 		hosts    = 4
@@ -232,7 +221,6 @@ func TestNoSlotIsLeakedWhenAdmissionTimesOut(t *testing.T) {
 
 	var placed, dropped atomic.Int64
 	var wg sync.WaitGroup
-	// Offer far more than the fleet can hold so many requests time out.
 	for i := 0; i < total*3; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -249,8 +237,6 @@ func TestNoSlotIsLeakedWhenAdmissionTimesOut(t *testing.T) {
 	}
 	wg.Wait()
 
-	// Whatever the split, the scheduler's occupancy must exactly equal the
-	// number of successful admissions. Any mismatch is a leaked slot.
 	stats := sched.Stats()
 	if int64(stats.InflightVMs) != placed.Load() {
 		t.Errorf("scheduler holds %d microVMs but %d admissions succeeded", stats.InflightVMs, placed.Load())
@@ -264,8 +250,6 @@ func TestNoSlotIsLeakedWhenAdmissionTimesOut(t *testing.T) {
 }
 
 func TestQueueFullAppliesBackpressureThenRejects(t *testing.T) {
-	// One slot of queue and a full fleet, so the second waiter cannot even be
-	// enqueued.
 	svc, _ := newService(t, 1, 2, Config{
 		QueueDepth:        1,
 		AdmissionDeadline: 80 * time.Millisecond,
@@ -298,8 +282,6 @@ func TestQueueFullAppliesBackpressureThenRejects(t *testing.T) {
 	if got := timeouts.Load() + full.Load(); got != 8 {
 		t.Errorf("accounted for %d of 8 waiters", got)
 	}
-	// The point of backpressure: a full queue makes callers wait for room
-	// rather than failing instantly, so some must have been enqueued.
 	if timeouts.Load() == 0 {
 		t.Error("no waiter was ever enqueued, backpressure is not working")
 	}
@@ -329,12 +311,10 @@ func TestQueueIsFirstInFirstOut(t *testing.T) {
 			}
 			order <- i
 		}(i)
-		// Serialise enqueueing so arrival order is well defined.
 		started.Wait()
 		time.Sleep(15 * time.Millisecond)
 	}
 
-	// Release slots one at a time; waiters should be served in arrival order.
 	for i := 0; i < waiters; i++ {
 		if i < 2 {
 			if err := svc.Release(fmt.Sprintf("filler-%d", i)); err != nil {
@@ -387,8 +367,6 @@ func TestStopDrainsWaitersInsteadOfHangingThem(t *testing.T) {
 
 	select {
 	case err := <-errs:
-		// A shutdown must not leave callers blocked on a channel nobody will
-		// ever write to.
 		if !errors.Is(err, ErrShuttingDown) {
 			t.Errorf("Admit() during shutdown error = %v, want ErrShuttingDown", err)
 		}
@@ -435,8 +413,6 @@ func TestStatsTrackQueueHighWaterMark(t *testing.T) {
 	}
 	wg.Wait()
 
-	// The high-water mark is what tells us after a run whether pre-provisioned
-	// capacity was actually doing its job.
 	if stats := svc.Stats(); stats.MaxQueueLen == 0 {
 		t.Error("Stats.MaxQueueLen = 0, expected the queue to have held waiters")
 	}

@@ -16,8 +16,6 @@ spec:
         prometheus.io/port: "8080"
     spec:
       # The control plane runs on the system node, not on vmhost capacity.
-      # Sharing would make the placement API compete with the microVMs it is
-      # trying to place, precisely when load is highest.
       nodeSelector:
         microvm.io/role: system
       containers:
@@ -31,8 +29,7 @@ spec:
             - -mean-ttl=500ms
             # On kwok a node appears in seconds rather than minutes, so the
             # lead term is tuned to the provisioning latency this environment
-            # actually exhibits. On EC2 metal this is minutes, and getting it
-            # from measurement rather than a guess is the whole point.
+            # actually exhibits.
             - -provision-latency=5s
             - -scale-down-window=20s
             - -min-replicas=2
@@ -46,9 +43,7 @@ spec:
             httpGet: {path: /readyz, port: http}
             periodSeconds: 2
           livenessProbe:
-            # Liveness deliberately hits /healthz, not /readyz. An empty fleet
-            # makes the service unready but not unhealthy, and restarting it
-            # would kill the component whose job is to ask for more capacity.
+            # Liveness deliberately hits /healthz, not /readyz.
             httpGet: {path: /healthz, port: http}
             periodSeconds: 10
           resources:

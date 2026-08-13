@@ -1,23 +1,4 @@
 // Command loadgen is the test harness.
-//
-// It offers a double ramp of traffic to the placement API: zero up to a peak,
-// back to zero, twice, with Poisson interarrivals layered on the smooth
-// envelope so the traffic is bursty rather than metronomic.
-//
-// # Open loop, and why it matters
-//
-// The generator issues requests on the schedule the envelope dictates,
-// regardless of whether earlier requests have completed. The obvious
-// alternative, a fixed pool of workers each looping "send, wait for reply,
-// send again", is closed loop: when the system slows down, the generator
-// automatically slows down with it. That silently reduces offered load exactly
-// when the system is struggling, which is precisely the condition this harness
-// exists to detect. A closed-loop generator cannot fail to meet its target rate,
-// because its target rate is defined by the system under test.
-//
-// The cost of open loop is that the generator must be able to hold as many
-// in-flight requests as the system is behind by, which is why results record
-// in-flight high-water marks alongside latency.
 package main
 
 import (
@@ -104,9 +85,6 @@ func run() error {
 		return err
 	}
 
-	// A connection pool sized to the expected in-flight count. Without this the
-	// default transport caps idle connections per host at 2 and the generator
-	// spends its time in TCP handshakes instead of offering load.
 	client := &http.Client{
 		Timeout: o.timeout,
 		Transport: &http.Transport{
@@ -147,9 +125,6 @@ func run() error {
 		if !ok {
 			break
 		}
-		// Absolute-time targeting rather than sleeping for the interarrival
-		// gap. A sleep that overshoots would otherwise push every subsequent
-		// arrival later and the run would drift below its target rate.
 		if delay := time.Until(start.Add(at)); delay > 0 {
 			select {
 			case <-time.After(delay):
@@ -223,8 +198,6 @@ func (h *harness) issue(ctx context.Context, seq int, at time.Duration) {
 			Host        string `json:"host"`
 			QueueWaitUS int64  `json:"queue_wait_us"`
 		}
-		// Always drain and close, or the connection cannot be reused and the
-		// pool churns sockets at exactly the moment it should be steady.
 		if resp.StatusCode == http.StatusCreated {
 			_ = json.NewDecoder(resp.Body).Decode(&decoded)
 			r.Host = decoded.Host
@@ -232,9 +205,6 @@ func (h *harness) issue(ctx context.Context, seq int, at time.Duration) {
 			h.placed.Add(1)
 		} else {
 			_, _ = io.Copy(io.Discard, resp.Body)
-			// 503 is the server admitting it lost the request. Anything else
-			// in this position is a client bug, and both are counted, but only
-			// the first is a violation of the objective.
 			if resp.StatusCode == http.StatusServiceUnavailable {
 				h.dropped.Add(1)
 			} else {
@@ -300,8 +270,6 @@ func (h *harness) finish(start time.Time, wg *sync.WaitGroup) error {
 		p99.Round(time.Microsecond), max.Round(time.Microsecond))
 
 	if dropped > 0 || failed > 0 {
-		// Non-zero exit so `make demo` and CI fail loudly rather than printing
-		// a bad number that someone has to notice.
 		return fmt.Errorf("objective not met: %d dropped, %d failed", dropped, failed)
 	}
 	fmt.Printf("\n  100%% placement, zero drops.\n")

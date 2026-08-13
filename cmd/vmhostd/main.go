@@ -1,9 +1,4 @@
 // Command vmhostd is the per-pod agent that actually runs microVMs.
-//
-// It owns a fixed number of slots, boots and reaps guests through a
-// hypervisor.Hypervisor, and registers itself with the placement API so the
-// scheduler knows the capacity exists. One of these runs per vmhost pod, and
-// the pod's slot count is what makes "several microVMs per pod" true.
 package main
 
 import (
@@ -103,8 +98,6 @@ func run() error {
 		log:        log,
 	}
 
-	// Expired guests must give their slot back to the scheduler, or capacity
-	// would leak away one TTL at a time.
 	if reaper, ok := hv.(hypervisor.Reaper); ok {
 		go agent.watchExpiries(ctx, reaper, o.placementAPI)
 	}
@@ -131,9 +124,6 @@ func run() error {
 		if advertise == "" {
 			advertise = defaultAdvertise(hostID, o.addr)
 		}
-		// Registration is retried rather than fatal: the agent may well start
-		// before the placement API is reachable, which is routine during a
-		// rollout and not a reason to crashloop.
 		go reg2.registerAndHeartbeat(ctx, hostID, o.slots, advertise, o.heartbeatInterval)
 	}
 
@@ -144,8 +134,6 @@ func run() error {
 		log.Info("shutting down")
 	}
 
-	// Deregister first so the scheduler stops sending work here while we still
-	// have time to finish what is already running.
 	if reg2 != nil {
 		reg2.deregister(hostID)
 	}
@@ -243,8 +231,6 @@ func (a *agent) handleStartVM(w http.ResponseWriter, r *http.Request) {
 		a.metrics.VMBootFailures.WithLabelValues(a.kind).Inc()
 		status := http.StatusInternalServerError
 		if errors.Is(err, hypervisor.ErrNoCapacity) {
-			// The scheduler's view of this host was stale. Conflict rather
-			// than 500 so the caller knows to place elsewhere and retry.
 			status = http.StatusConflict
 		}
 		a.log.Error("boot failed", "vm_id", req.ID, "error", err)
@@ -334,8 +320,6 @@ func (c *placementClient) registerAndHeartbeat(ctx context.Context, hostID strin
 				registered = true
 			}
 		} else if err := c.heartbeat(ctx, hostID); err != nil {
-			// A 404 means the placement API forgot us, typically because it
-			// restarted. Re-register rather than heartbeat into the void.
 			c.log.Warn("heartbeat failed, re-registering", "error", err)
 			registered = false
 		}
@@ -374,16 +358,12 @@ func (c *placementClient) releaseVM(ctx context.Context, vmID string) {
 	if err != nil {
 		return
 	}
-	// A 404 is fine and common: the placement API may already have released
-	// this microVM itself.
 	if err := c.do(req, http.StatusNoContent, http.StatusNotFound); err != nil {
 		c.log.Warn("failed to report expiry", "vm_id", vmID, "error", err)
 	}
 }
 
 func (c *placementClient) deregister(hostID string) {
-	// Deliberately not tied to the cancelled shutdown context, and given a
-	// short independent budget, so a clean drain still gets announced.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/v1/hosts/"+hostID, nil)

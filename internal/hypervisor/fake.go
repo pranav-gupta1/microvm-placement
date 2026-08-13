@@ -9,10 +9,7 @@ import (
 )
 
 // Default boot timing for the fake, chosen to match measured Firecracker
-// snapshot restore on a Graviton metal host. Restoring a 1 GiB guest from a
-// snapshot lands in the low tens of milliseconds, an order of magnitude faster
-// than the roughly 125 ms cold boot, which is what makes a microVM per request
-// viable at 1000 requests per second in the first place.
+// snapshot restore on a Graviton metal host.
 const (
 	DefaultBootLatency = 25 * time.Millisecond
 	DefaultBootJitter  = 10 * time.Millisecond
@@ -21,24 +18,12 @@ const (
 
 // FakeConfig configures the in-process hypervisor model.
 type FakeConfig struct {
-	// Slots is the number of microVMs this host can run at once. It must be at
-	// least 2 to satisfy the assignment's floor of several microVMs per pod.
-	Slots int
-	// BootLatency is the mean time Start blocks for.
+	Slots       int
 	BootLatency time.Duration
-	// BootJitter is the half-width of a uniform distribution around
-	// BootLatency. Real restore times vary with page-fault behaviour, and a
-	// constant latency would hide queueing effects that only appear when
-	// service times have spread.
-	BootJitter time.Duration
-	// StopLatency is the mean time Stop blocks for.
+	BootJitter  time.Duration
 	StopLatency time.Duration
-	// FailureRate is the probability in [0,1] that a Start fails. Defaults to
-	// zero. A hypervisor that never fails lets the layers above it be written
-	// without error handling, so tests turn this up deliberately.
 	FailureRate float64
-	// Seed makes latency and failure sampling reproducible.
-	Seed uint64
+	Seed        uint64
 }
 
 func (c *FakeConfig) applyDefaults() {
@@ -71,7 +56,7 @@ func (c FakeConfig) Validate() error {
 }
 
 // Fake is an in-process Hypervisor that models timing and capacity without
-// needing hardware virtualisation. It implements Reaper.
+// needing hardware virtualisation.
 type Fake struct {
 	cfg FakeConfig
 
@@ -80,9 +65,6 @@ type Fake struct {
 	running map[string]*fakeVM
 	closed  bool
 
-	// expired carries reaped microVM IDs to the agent. It is generously
-	// buffered so that a brief stall in the consumer cannot block a reaper
-	// timer, which would otherwise delay the slot being returned.
 	expired chan string
 	wg      sync.WaitGroup
 }
@@ -124,22 +106,16 @@ func (f *Fake) Running() int {
 // Expired implements Reaper.
 func (f *Fake) Expired() <-chan string { return f.expired }
 
-// sampleBootLatency draws a boot time. Callers hold f.mu.
+// sampleBootLatency draws a boot time.
 func (f *Fake) sampleBootLatency() time.Duration {
 	if f.cfg.BootJitter == 0 {
 		return f.cfg.BootLatency
 	}
-	// Uniform over [mean-jitter, mean+jitter]. Validate guarantees this stays
-	// non-negative.
 	offset := time.Duration(f.rng.Int64N(int64(2*f.cfg.BootJitter))) - f.cfg.BootJitter
 	return f.cfg.BootLatency + offset
 }
 
 // Start implements Hypervisor.
-//
-// The slot is reserved before the simulated boot delay, so concurrent callers
-// cannot oversubscribe the host by racing through the latency window. That
-// mirrors the real implementation, where the jailer allocates the slot up front.
 func (f *Fake) Start(ctx context.Context, spec Spec) (Instance, error) {
 	if err := spec.Validate(); err != nil {
 		return Instance{}, err
@@ -160,8 +136,6 @@ func (f *Fake) Start(ctx context.Context, spec Spec) (Instance, error) {
 	}
 	latency := f.sampleBootLatency()
 	fail := f.cfg.FailureRate > 0 && f.rng.Float64() < f.cfg.FailureRate
-	// Reserve the slot with a placeholder so the capacity check above is
-	// authoritative for the whole boot window.
 	vm := &fakeVM{}
 	f.running[spec.ID] = vm
 	f.mu.Unlock()
@@ -188,8 +162,6 @@ func (f *Fake) Start(ctx context.Context, spec Spec) (Instance, error) {
 	}
 
 	f.mu.Lock()
-	// Close may have run while we were booting, in which case the placeholder
-	// is already gone and this microVM must not be registered.
 	if f.closed {
 		f.mu.Unlock()
 		return Instance{}, ErrClosed
@@ -215,8 +187,6 @@ func (f *Fake) reap(id string) {
 		return
 	}
 	if _, ok := f.running[id]; !ok {
-		// Already stopped explicitly. Nothing to do, and crucially no
-		// notification, or the agent would double-free the scheduler slot.
 		f.mu.Unlock()
 		return
 	}
@@ -226,9 +196,6 @@ func (f *Fake) reap(id string) {
 	select {
 	case f.expired <- id:
 	default:
-		// The buffer is sized at four times the slot count, so this is
-		// effectively unreachable. Dropping is still better than blocking a
-		// timer goroutine forever if the consumer has gone away.
 	}
 }
 
@@ -246,7 +213,6 @@ func (f *Fake) Stop(ctx context.Context, id string) error {
 	}
 	delete(f.running, id)
 	if vm.timer != nil && vm.timer.Stop() {
-		// We beat the reaper to it, so its wg.Done will never run.
 		f.wg.Done()
 	}
 	latency := f.cfg.StopLatency
@@ -255,7 +221,7 @@ func (f *Fake) Stop(ctx context.Context, id string) error {
 	return sleepCtx(ctx, latency)
 }
 
-// Close implements Hypervisor. It is idempotent.
+// Close implements Hypervisor.
 func (f *Fake) Close() error {
 	f.mu.Lock()
 	if f.closed {
@@ -271,17 +237,12 @@ func (f *Fake) Close() error {
 	}
 	f.mu.Unlock()
 
-	// Wait for any reaper timer that already fired to finish before closing
-	// the channel it sends on.
 	f.wg.Wait()
 	close(f.expired)
 	return nil
 }
 
-// sleepCtx sleeps for d, returning early if ctx is cancelled. A zero or
-// negative duration returns immediately without touching the timer subsystem,
-// which matters because unit tests configure zero latency and run tens of
-// thousands of operations.
+// sleepCtx sleeps for d, returning early if ctx is cancelled.
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return ctx.Err()

@@ -1,18 +1,4 @@
 # kind cluster for the local demo.
-#
-# A single node is enough. Karpenter runs with its kwok provider here, which
-# fabricates Node objects rather than calling a cloud API, so node scaling is
-# exercised for real without any real machines existing. See
-# docs/decisions/0004-karpenter-kwok.md.
-#
-# Sized for an 8 GiB laptop: one node, and host port mappings rather than a
-# LoadBalancer so nothing else has to run.
-#
-# Deliberately no kubeadm patches. kind already removes the control-plane taint
-# on a single-node cluster, and doing it here as well makes kind's own untaint
-# step fail with "taint not found". Node labels are applied after creation by
-# deploy/kind/up.sh, which keeps this file independent of the kubeadm API
-# version that ships with any given node image.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: microvm

@@ -62,8 +62,6 @@ func TestFakeConfigValidate(t *testing.T) {
 	}{
 		{"valid", FakeConfig{Slots: 8}, false},
 		{"minimum slots", FakeConfig{Slots: 2}, false},
-		// The assignment requires several microVMs per pod, so a single-slot
-		// host is a configuration error rather than a small host.
 		{"one slot", FakeConfig{Slots: 1}, true},
 		{"zero slots", FakeConfig{Slots: 0}, true},
 		{"jitter exceeds mean", FakeConfig{Slots: 4, BootLatency: time.Millisecond, BootJitter: time.Second}, true},
@@ -149,9 +147,7 @@ func TestCapacityIsEnforced(t *testing.T) {
 }
 
 // TestConcurrentStartsDoNotOversubscribe is the reason the slot is reserved
-// before the simulated boot delay rather than after. With a real boot window of
-// tens of milliseconds, checking capacity and then sleeping would let every
-// concurrent caller pass the check before any of them registered.
+// before the simulated boot delay rather than after.
 func TestConcurrentStartsDoNotOversubscribe(t *testing.T) {
 	const (
 		slots   = 8
@@ -226,9 +222,7 @@ func TestTTLReapsAndNotifies(t *testing.T) {
 	}
 }
 
-// TestExplicitStopSuppressesTheExpiryNotification guards a double-free. If a
-// microVM stopped before its TTL still fired an expiry, the agent would return
-// its scheduler slot twice and the fleet's accounting would drift.
+// TestExplicitStopSuppressesTheExpiryNotification guards a double-free.
 func TestExplicitStopSuppressesTheExpiryNotification(t *testing.T) {
 	f := instant(t, 4)
 	ctx := context.Background()
@@ -244,7 +238,6 @@ func TestExplicitStopSuppressesTheExpiryNotification(t *testing.T) {
 	case id := <-f.Expired():
 		t.Fatalf("Expired() delivered %q for a microVM that was explicitly stopped", id)
 	case <-time.After(150 * time.Millisecond):
-		// Correct: the TTL elapsed with no notification.
 	}
 }
 
@@ -299,8 +292,6 @@ func TestFailureRateIsHonouredAndReleasesTheSlot(t *testing.T) {
 			t.Fatalf("Start() error = %v, want ErrBootFailed", err)
 		}
 	}
-	// A failed boot must not leak its reserved slot, or the host would wedge
-	// at zero capacity after a burst of failures.
 	if got := f.Running(); got != 0 {
 		t.Errorf("Running() after 20 failed boots = %d, want 0", got)
 	}
@@ -316,9 +307,6 @@ func TestPartialFailureRate(t *testing.T) {
 	}
 	defer func() { _ = f.Close() }()
 
-	// Each microVM is stopped immediately so the host never runs out of slots.
-	// Otherwise ErrNoCapacity would be miscounted as a boot failure and the
-	// measured rate would converge on the wrong number entirely.
 	const n = 4000
 	failures := 0
 	ctx := context.Background()
@@ -335,8 +323,6 @@ func TestPartialFailureRate(t *testing.T) {
 			}
 		}
 	}
-	// Binomial with p=0.25, n=4000 has sigma of about 27, so a 15% relative
-	// band is far outside sampling noise.
 	if rel := float64(failures)/float64(n)/0.25 - 1; rel > 0.15 || rel < -0.15 {
 		t.Errorf("observed failure rate %.3f, want about 0.25", float64(failures)/float64(n))
 	}
@@ -355,8 +341,6 @@ func TestCancelledContextDuringBootReleasesTheSlot(t *testing.T) {
 	if _, err := f.Start(ctx, spec("vm-slow", 0)); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Start() error = %v, want context.DeadlineExceeded", err)
 	}
-	// An abandoned boot must give its slot back, otherwise a burst of client
-	// timeouts would permanently shrink the host.
 	if got := f.Running(); got != 0 {
 		t.Errorf("Running() after cancelled boot = %d, want 0", got)
 	}
@@ -389,8 +373,6 @@ func TestBootLatencyStaysWithinTheConfiguredBand(t *testing.T) {
 			sawAbove = true
 		}
 	}
-	// Jitter that never varies is not jitter, and constant service times would
-	// hide the queueing effects this model exists to reproduce.
 	if !sawBelow || !sawAbove {
 		t.Error("boot latency did not vary on both sides of the mean")
 	}
@@ -398,24 +380,18 @@ func TestBootLatencyStaysWithinTheConfiguredBand(t *testing.T) {
 
 // TestSpecValidateRejectsDangerousIDs guards the two places a microVM
 // identifier escapes into something that interprets it: the guest kernel
-// command line, and the filesystem path a jailer builds. Neither is reachable
-// through this project's fixed request shape, but the constraint belongs on the
-// type rather than in the memory of whoever adds the next hypervisor.
+// command line, and the filesystem path a jailer builds.
 func TestSpecValidateRejectsDangerousIDs(t *testing.T) {
 	tests := []struct {
 		name string
 		id   string
 	}{
-		// Whitespace would let a caller append arbitrary kernel parameters.
 		{"kernel parameter injection", "vm1 init=/bin/sh"},
 		{"tab", "vm1\tinit=/bin/sh"},
 		{"newline", "vm1\ninit=/bin/sh"},
-		// Path traversal out of a jailer chroot.
 		{"path separator", "../../etc/passwd"},
 		{"parent reference", ".."},
 		{"leading dot", ".hidden"},
-		// Shell metacharacters. No shell is involved, but allowing them is
-		// asking for trouble the first time one is.
 		{"semicolon", "vm1;rm -rf /"},
 		{"backtick", "vm1`whoami`"},
 		{"dollar", "vm1$(id)"},
@@ -431,8 +407,6 @@ func TestSpecValidateRejectsDangerousIDs(t *testing.T) {
 		})
 	}
 
-	// Everything the system actually generates must still be accepted:
-	// UUIDs from the API and vm-<n> from the load generator.
 	for _, id := range []string{
 		"vm-123",
 		"3f2504e0-4f89-11d3-9a0c-0305e82c3301",

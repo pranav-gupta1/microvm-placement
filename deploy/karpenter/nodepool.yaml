@@ -1,10 +1,4 @@
 # Karpenter node provisioning for the vmhost fleet.
-#
-# The provider here is kwok, which fabricates Node objects instead of calling a
-# cloud API. Karpenter's own scheduling, disruption, consolidation and buffer
-# logic all run for real; only the machines are simulated. See
-# docs/decisions/0004-karpenter-kwok.md for why that is the right trade for a
-# zero-budget submission, and infra/terraform/ for the EC2 equivalent.
 ---
 apiVersion: karpenter.kwok.sh/v1alpha1
 kind: KWOKNodeClass
@@ -27,9 +21,7 @@ spec:
         kind: KWOKNodeClass
         name: default
       # Instance families are named to mirror the metal shapes the EC2 build
-      # would use. On kwok these are labels rather than real hardware, but
-      # keeping them faithful means the NodePool transfers to the AWS provider
-      # by swapping the nodeClassRef alone.
+      # would use.
       requirements:
         - key: kubernetes.io/arch
           operator: In
@@ -38,8 +30,7 @@ spec:
           operator: In
           values: ["linux"]
         - key: karpenter.sh/capacity-type
-          # Spot first with on-demand fallback. Bare metal spot capacity is
-          # thin, so a shortfall must degrade cost rather than availability.
+          # Spot first with on-demand fallback.
           operator: In
           values: ["spot", "on-demand"]
         - key: node.kubernetes.io/instance-type
@@ -52,18 +43,13 @@ spec:
 
   disruption:
     # Reclaim nodes that are empty or that could be packed onto fewer nodes.
-    # This is the node-level half of the idle-minimisation objective; best-fit
-    # placement and KEDA scale-down are the pod-level half, and consolidation
-    # only has anything to work with because those two empty pods out first.
     consolidationPolicy: WhenEmptyOrUnderutilized
     # Long enough that the trough between the two load cycles does not trigger
     # a full teardown that cannot be rebuilt in time for the second climb.
     consolidateAfter: 2m
 
   limits:
-    # A hard ceiling on blast radius. At 8 slots per pod and ~7 pods per node,
-    # this covers well beyond the 12 nodes docs/capacity-planning.md derives
-    # for 1000 rps.
+    # A hard ceiling on blast radius.
     cpu: "1024"
     memory: 2048Gi
 

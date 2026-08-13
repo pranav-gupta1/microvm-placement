@@ -1,15 +1,4 @@
 // Package sim runs the whole system end to end against a simulated fleet.
-//
-// Everything above the Kubernetes boundary is the real code: the real arrival
-// process, the real admission queue, the real scheduler, the real autoscaler.
-// What is simulated is the part Kubernetes would otherwise own, namely pods
-// taking time to become ready and time to go away.
-//
-// That boundary is chosen so the simulation can be wrong about Kubernetes and
-// still be right about everything the assignment grades. Placement, the
-// zero-drop guarantee, and idle-pod minimisation are all decided by the real
-// packages here; the simulator only supplies the latency that makes those
-// decisions hard.
 package sim
 
 import (
@@ -30,24 +19,14 @@ import (
 
 // Config parameterises a simulated run.
 type Config struct {
-	// Envelope is the offered load shape.
-	Envelope loadgen.Envelope
-	// Seed makes the run reproducible.
-	Seed uint64
-	// MeanTTL is the mean microVM lifetime, exponentially distributed.
-	MeanTTL time.Duration
-	// SlotsPerHost is the vmhost pod slot count.
-	SlotsPerHost int
-	// PodStartLatency is how long a new vmhost pod takes to become ready. This
-	// is the delay the autoscaler's lead term exists to cover.
+	Envelope        loadgen.Envelope
+	Seed            uint64
+	MeanTTL         time.Duration
+	SlotsPerHost    int
 	PodStartLatency time.Duration
-	// SampleInterval is how often the autoscaler is consulted, equivalent to
-	// the KEDA polling interval.
-	SampleInterval time.Duration
-	// Autoscale configures the scaling policy.
-	Autoscale autoscale.Config
-	// Placement configures the admission path.
-	Placement placement.Config
+	SampleInterval  time.Duration
+	Autoscale       autoscale.Config
+	Placement       placement.Config
 }
 
 // Validate reports whether the configuration is usable.
@@ -73,47 +52,30 @@ func (c Config) Validate() error {
 // Snapshot is one sampled point on the run timeline, and the row format the
 // dashboard and the plotting script consume.
 type Snapshot struct {
-	// Elapsed is time since the run started.
-	Elapsed time.Duration
-	// OfferedRate is the measured arrival rate over the last interval.
-	OfferedRate float64
-	// InflightVMs is microVMs running at the sample instant.
-	InflightVMs int
-	// DesiredHosts is what the autoscaler asked for.
-	DesiredHosts int
-	// ReadyHosts is what was actually serving.
-	ReadyHosts int
-	// PendingHosts is pods started but not yet ready.
-	PendingHosts int
-	// DrainingHosts is pods on their way out.
+	Elapsed       time.Duration
+	OfferedRate   float64
+	InflightVMs   int
+	DesiredHosts  int
+	ReadyHosts    int
+	PendingHosts  int
 	DrainingHosts int
-	// IdleHosts is ready hosts running nothing, the quantity to minimise.
-	IdleHosts int
-	// Utilisation is occupied slots over ready slots.
-	Utilisation float64
-	// QueueDepth is admission queue occupancy.
-	QueueDepth int
-	// Dropped is the cumulative drop count, which must stay at zero.
-	Dropped uint64
+	IdleHosts     int
+	Utilisation   float64
+	QueueDepth    int
+	Dropped       uint64
 }
 
 // Result summarises a completed run.
 type Result struct {
-	Offered int
-	Placed  int
-	// Dropped is TimedOut plus QueueRejected, and must be zero. It is unsigned
-	// to match the counters it sums, which also avoids a lossy conversion.
-	Dropped  uint64
-	TimedOut uint64
-	// QueueRejected counts requests that could not even be enqueued.
-	QueueRejected uint64
-	PeakInflight  int
-	PeakHosts     int
-	MaxQueueDepth uint64
-	// HostSeconds is the integral of ready hosts over time, the simulation's
-	// proxy for the compute bill.
-	HostSeconds float64
-	// IdleHostSeconds is the portion of that spent on hosts running nothing.
+	Offered         int
+	Placed          int
+	Dropped         uint64
+	TimedOut        uint64
+	QueueRejected   uint64
+	PeakInflight    int
+	PeakHosts       int
+	MaxQueueDepth   uint64
+	HostSeconds     float64
 	IdleHostSeconds float64
 	WaitP50         time.Duration
 	WaitP99         time.Duration
@@ -121,8 +83,7 @@ type Result struct {
 	Timeline        []Snapshot
 }
 
-// PlacementRate is the fraction of offered requests that were placed. The
-// assignment requires this to be 1.
+// PlacementRate is the fraction of offered requests that were placed.
 func (r Result) PlacementRate() float64 {
 	if r.Offered == 0 {
 		return 0
@@ -165,8 +126,6 @@ func Run(ctx context.Context, cfg Config) (Result, error) {
 		slotsPerHost: cfg.SlotsPerHost,
 		startLatency: cfg.PodStartLatency,
 	}
-	// Seed the fleet with the configured floor so the run does not begin with
-	// zero capacity, which is what MinReplicas exists for.
 	f.reconcile(runCtx, cfg.Autoscale.MinReplicas)
 
 	r := &runner{
@@ -217,12 +176,6 @@ func (r *runner) run(ctx context.Context) (Result, error) {
 	start := time.Now()
 	var wg sync.WaitGroup
 
-	// The sampler plays the part of KEDA polling the metric, and of the
-	// Deployment controller acting on the result.
-	//
-	// It gets its own cancellable context so the run can stop sampling and
-	// collect the timeline once the load is done, without cancelling the run
-	// context that in-flight releases still depend on.
 	sampleCtx, stopSampling := context.WithCancel(ctx)
 	defer stopSampling()
 	samplerDone := make(chan []Snapshot, 1)
@@ -230,10 +183,6 @@ func (r *runner) run(ctx context.Context) (Result, error) {
 		samplerDone <- r.sample(sampleCtx, start)
 	}()
 
-	// Open-loop arrival driver. Requests are issued on the schedule the
-	// envelope dictates, regardless of how the system is coping. A closed-loop
-	// generator would quietly reduce offered load when the system slowed,
-	// hiding exactly the failure this run exists to detect.
 	for {
 		at, ok := proc.Next()
 		if !ok {
@@ -261,12 +210,8 @@ func (r *runner) run(ctx context.Context) (Result, error) {
 		}(id)
 	}
 
-	// Let outstanding microVMs finish so the fleet drains and the tail of the
-	// run is observable, rather than cutting off at the last arrival.
 	wg.Wait()
 
-	// Stop sampling before collecting, or the read below would block until its
-	// own timeout and throw away the entire timeline.
 	stopSampling()
 
 	return r.finish(ctx, start, samplerDone), nil
@@ -276,7 +221,6 @@ func (r *runner) run(ctx context.Context) (Result, error) {
 func (r *runner) issue(ctx context.Context, vmID string) {
 	res, err := r.svc.Admit(ctx, placement.Request{VMID: vmID, TTL: r.cfg.MeanTTL})
 	if err != nil {
-		// Counted by the service; nothing more to do here.
 		return
 	}
 	r.placed.Add(1)
@@ -294,7 +238,6 @@ func (r *runner) issue(ctx context.Context, vmID string) {
 	case <-time.After(ttl):
 	case <-ctx.Done():
 	}
-	// Release even on cancellation so the fleet accounting stays consistent.
 	_ = r.svc.Release(vmID)
 }
 
@@ -346,7 +289,6 @@ func (r *runner) step(ctx context.Context, start, now time.Time) Snapshot {
 
 // finish stops sampling and assembles the result.
 func (r *runner) finish(ctx context.Context, start time.Time, samplerDone <-chan []Snapshot) Result {
-	// Take one closing sample so the drained tail appears on the timeline.
 	final := r.step(ctx, start, time.Now())
 
 	var timeline []Snapshot

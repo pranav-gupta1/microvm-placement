@@ -57,16 +57,13 @@ func TestConfigValidate(t *testing.T) {
 }
 
 // TestSteadyStateMatchesTheCapacityPlan pins the arithmetic in the design doc.
-// At the assignment's peak the fleet must land on the 79 pods derived there.
 func TestSteadyStateMatchesTheCapacityPlan(t *testing.T) {
 	a := mustNew(t, productionConfig())
 	now := time.Now()
 
-	// Two identical samples so the slope is zero and no lead term applies.
 	a.Decide(Sample{At: now, ArrivalRate: 1000, InflightVMs: 500})
 	d := a.Decide(Sample{At: now.Add(time.Second), ArrivalRate: 1000, InflightVMs: 500})
 
-	// 1000 req/s x 0.5 s = 500 microVMs; 500 / 0.8 = 625 slots; 625 / 8 = 79 pods.
 	if d.Replicas != 79 {
 		t.Errorf("Replicas = %d, want 79 to match the capacity plan", d.Replicas)
 	}
@@ -75,31 +72,23 @@ func TestSteadyStateMatchesTheCapacityPlan(t *testing.T) {
 	}
 }
 
-// TestLeadTermAnticipatesTheRamp is the reason this package exists. On a
-// climbing ramp the fleet must be sized for the traffic that will exist once
-// pods are ready, not for the traffic that already arrived.
+// TestLeadTermAnticipatesTheRamp is the reason this package exists.
 func TestLeadTermAnticipatesTheRamp(t *testing.T) {
 	cfg := productionConfig()
 	cfg.ScaleDownStabilization = 0
 	a := mustNew(t, cfg)
 	now := time.Now()
 
-	// A ramp climbing at 100 requests per second, per second.
 	a.Decide(Sample{At: now, ArrivalRate: 100, InflightVMs: 50})
 	d := a.Decide(Sample{At: now.Add(time.Second), ArrivalRate: 200, InflightVMs: 100})
 
-	// Slope is 100 rps/s over a 20 s horizon, so the lead term is 2000 rps.
 	if math.Abs(d.LeadTerm-2000) > 1e-6 {
 		t.Errorf("LeadTerm = %v, want 2000", d.LeadTerm)
 	}
-	// Predicted rate 200 + 2000 = 2200 rps, so 1100 concurrent microVMs.
 	if math.Abs(d.PredictedVMs-1100) > 1e-6 {
 		t.Errorf("PredictedVMs = %v, want 1100", d.PredictedVMs)
 	}
 
-	// A reactive scaler would size for the 100 microVMs in flight right now,
-	// which is 13 pods. The lead compensator asks for far more, and that gap
-	// is exactly the requests a reactive scaler would drop.
 	reactive := int(math.Ceil(100 / 0.8 / 8))
 	if d.Replicas <= reactive {
 		t.Errorf("Replicas = %d, want more than the reactive answer of %d", d.Replicas, reactive)
@@ -109,16 +98,6 @@ func TestLeadTermAnticipatesTheRamp(t *testing.T) {
 // TestNoisyFlatLoadDoesNotInflateTheFleet is a regression test for a real
 // over-provisioning bug, and the reason the slope is estimated by regression
 // rather than by differencing consecutive samples.
-//
-// Arrivals are Poisson, so a rate measured over a short window is noisy. If the
-// derivative is taken from two such samples, the noise swamps the signal, and
-// because only a rising rate feeds the lead term, clamping at zero rectifies
-// that symmetric noise into a systematic over-estimate. On the 1000 rps double
-// ramp this inflated the fleet from 79 pods to 198 and left half the compute
-// bill idle.
-//
-// Here the true arrival rate is dead flat, so the correct answer is the steady
-// state size and nothing more.
 func TestNoisyFlatLoadDoesNotInflateTheFleet(t *testing.T) {
 	cfg := productionConfig()
 	cfg.ScaleDownStabilization = 0
@@ -127,11 +106,8 @@ func TestNoisyFlatLoadDoesNotInflateTheFleet(t *testing.T) {
 	const (
 		trueRate = 500.0
 		interval = 250 * time.Millisecond
-		// Poisson noise on a rate measured over the interval.
-		noise = 45.0
+		noise    = 45.0
 	)
-	// Deterministic alternating noise, which is the worst case for
-	// differencing: every consecutive pair implies a huge slope.
 	now := time.Now()
 	var maxReplicas int
 	for i := 0; i < 80; i++ {
@@ -145,16 +121,12 @@ func TestNoisyFlatLoadDoesNotInflateTheFleet(t *testing.T) {
 			ArrivalRate: rate,
 			InflightVMs: int(trueRate * cfg.MeanTTL.Seconds()),
 		})
-		// Ignore the first few samples while the window fills.
 		if i > 12 && d.Replicas > maxReplicas {
 			maxReplicas = d.Replicas
 		}
 	}
 
-	// Steady state: 500 rps x 0.5 s = 250 microVMs, / 0.8 = 313 slots, / 8 = 40 pods.
 	const steadyState = 40
-	// A little headroom is fine, but nothing like the 2.5x the differencing
-	// estimator produced.
 	if maxReplicas > steadyState+8 {
 		t.Errorf("flat but noisy load provisioned %d pods, want no more than %d: the derivative is amplifying noise",
 			maxReplicas, steadyState+8)
@@ -170,8 +142,6 @@ func TestFallingRateProducesNoNegativeLead(t *testing.T) {
 	a.Decide(Sample{At: now, ArrivalRate: 1000, InflightVMs: 500})
 	d := a.Decide(Sample{At: now.Add(time.Second), ArrivalRate: 500, InflightVMs: 250})
 
-	// A negative lead term would shed capacity faster than demand is actually
-	// falling, dropping work that is still arriving.
 	if d.LeadTerm != 0 {
 		t.Errorf("LeadTerm = %v on a falling ramp, want 0", d.LeadTerm)
 	}
@@ -180,21 +150,16 @@ func TestFallingRateProducesNoNegativeLead(t *testing.T) {
 	}
 }
 
-// TestInflightActsAsAFloor guards against trusting the model over reality. If
-// the predicted concurrency is somehow low, the microVMs actually running must
-// still be covered.
+// TestInflightActsAsAFloor guards against trusting the model over reality.
 func TestInflightActsAsAFloor(t *testing.T) {
 	cfg := productionConfig()
 	cfg.ScaleDownStabilization = 0
 	a := mustNew(t, cfg)
 	now := time.Now()
 
-	// Zero measured arrival rate but 400 microVMs still running, which is what
-	// the tail of a ramp looks like.
 	a.Decide(Sample{At: now, ArrivalRate: 0, InflightVMs: 400})
 	d := a.Decide(Sample{At: now.Add(time.Second), ArrivalRate: 0, InflightVMs: 400})
 
-	// 400 / 0.8 / 8 = 63 pods.
 	if d.Replicas != 63 {
 		t.Errorf("Replicas = %d, want 63 to cover the microVMs actually running", d.Replicas)
 	}
@@ -228,7 +193,6 @@ func TestScaleDownIsHeldByTheStabilizationWindow(t *testing.T) {
 	a.Decide(Sample{At: now, ArrivalRate: 1000, InflightVMs: 500})
 	peak := a.Decide(Sample{At: now.Add(time.Second), ArrivalRate: 1000, InflightVMs: 500})
 
-	// Demand collapses. Inside the window the fleet must hold its size.
 	held := a.Decide(Sample{At: now.Add(6 * time.Second), ArrivalRate: 0, InflightVMs: 0})
 	if held.Replicas != peak.Replicas {
 		t.Errorf("Replicas = %d inside the stabilisation window, want %d held", held.Replicas, peak.Replicas)
@@ -237,7 +201,6 @@ func TestScaleDownIsHeldByTheStabilizationWindow(t *testing.T) {
 		t.Error("HeldByStabilization = false, want true while the window is open")
 	}
 
-	// Once the window elapses with sustained low demand, capacity is released.
 	released := a.Decide(Sample{At: now.Add(45 * time.Second), ArrivalRate: 0, InflightVMs: 0})
 	if released.Replicas != cfg.MinReplicas {
 		t.Errorf("Replicas = %d after the window elapsed, want the floor of %d", released.Replicas, cfg.MinReplicas)
@@ -255,11 +218,9 @@ func TestStabilizationWindowRestartsOnEachNewPeak(t *testing.T) {
 
 	a.Decide(Sample{At: now, ArrivalRate: 1000, InflightVMs: 500})
 	a.Decide(Sample{At: now.Add(time.Second), ArrivalRate: 1000, InflightVMs: 500})
-	// A brief lull, then load returns before the window expires.
 	a.Decide(Sample{At: now.Add(20 * time.Second), ArrivalRate: 0, InflightVMs: 0})
 	a.Decide(Sample{At: now.Add(25 * time.Second), ArrivalRate: 1000, InflightVMs: 500})
 
-	// The window restarted at t=25s, so at t=45s it is still open.
 	held := a.Decide(Sample{At: now.Add(45 * time.Second), ArrivalRate: 0, InflightVMs: 0})
 	if !held.HeldByStabilization {
 		t.Error("the stabilisation window did not restart on the new peak")
@@ -274,15 +235,12 @@ func TestMinAndMaxReplicasAreEnforced(t *testing.T) {
 	a := mustNew(t, cfg)
 	now := time.Now()
 
-	// Idle: the floor covers the cold start, where there is no traffic to
-	// measure and no history to extrapolate from.
 	a.Decide(Sample{At: now, ArrivalRate: 0, InflightVMs: 0})
 	idle := a.Decide(Sample{At: now.Add(time.Second), ArrivalRate: 0, InflightVMs: 0})
 	if idle.Replicas != 3 {
 		t.Errorf("Replicas = %d when idle, want the floor of 3", idle.Replicas)
 	}
 
-	// Overload: the ceiling bounds both cost and the damage a bad signal can do.
 	huge := a.Decide(Sample{At: now.Add(2 * time.Second), ArrivalRate: 100000, InflightVMs: 50000})
 	if huge.Replicas != 10 {
 		t.Errorf("Replicas = %d under extreme load, want the ceiling of 10", huge.Replicas)
@@ -298,12 +256,10 @@ func TestOutOfOrderAndDuplicateSamplesDoNotBreakTheSlope(t *testing.T) {
 	a.Decide(Sample{At: now, ArrivalRate: 100, InflightVMs: 50})
 	a.Decide(Sample{At: now.Add(time.Second), ArrivalRate: 200, InflightVMs: 100})
 
-	// A duplicate timestamp must not divide by zero or invent a discontinuity.
 	dup := a.Decide(Sample{At: now.Add(time.Second), ArrivalRate: 200, InflightVMs: 100})
 	if math.IsNaN(dup.PredictedRate) || math.IsInf(dup.PredictedRate, 0) {
 		t.Fatalf("PredictedRate = %v on a duplicate sample", dup.PredictedRate)
 	}
-	// An out-of-order sample must be equally harmless.
 	old := a.Decide(Sample{At: now, ArrivalRate: 150, InflightVMs: 75})
 	if math.IsNaN(old.PredictedRate) || math.IsInf(old.PredictedRate, 0) {
 		t.Fatalf("PredictedRate = %v on an out-of-order sample", old.PredictedRate)
@@ -313,8 +269,6 @@ func TestOutOfOrderAndDuplicateSamplesDoNotBreakTheSlope(t *testing.T) {
 func TestFirstSampleHasNoSlope(t *testing.T) {
 	a := mustNew(t, productionConfig())
 	d := a.Decide(Sample{At: time.Now(), ArrivalRate: 500, InflightVMs: 250})
-	// With no history there is nothing to extrapolate from, so the lead term
-	// must be zero rather than an artefact of a zero-valued previous sample.
 	if d.LeadTerm != 0 {
 		t.Errorf("LeadTerm = %v on the first sample, want 0", d.LeadTerm)
 	}
@@ -350,7 +304,6 @@ func TestFleetTracksTheDoubleRamp(t *testing.T) {
 
 	var atFirstPeak, atTrough, atSecondPeak int
 	for sec := 0; sec <= 2*cycle; sec++ {
-		// Triangular rate, two cycles back to back.
 		phase := sec % cycle
 		var rate float64
 		if phase < cycle/2 {
@@ -378,9 +331,6 @@ func TestFleetTracksTheDoubleRamp(t *testing.T) {
 	if atSecondPeak < 79 {
 		t.Errorf("second peak allocated %d pods, want at least 79", atSecondPeak)
 	}
-	// The whole objective is that the trough is genuinely cheaper. A scaler
-	// that just holds peak capacity forever would pass a zero-drop test while
-	// failing the cost half of the assignment.
 	if atTrough >= atFirstPeak {
 		t.Errorf("trough allocated %d pods against a peak of %d, capacity is not being reclaimed", atTrough, atFirstPeak)
 	}

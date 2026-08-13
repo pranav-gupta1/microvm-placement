@@ -1,22 +1,4 @@
 // Package placement turns an incoming request into a placed microVM.
-//
-// Its whole reason for existing is the assignment's hard constraint: every
-// request must be placed, so the service is not allowed to answer "no". When
-// there is no free slot the request waits instead of failing, and the waiting
-// is bounded so a caller is never hung indefinitely.
-//
-// # What the queue is for, and what it is not for
-//
-// The admission queue absorbs short transients: Poisson clumping in the arrival
-// stream, a scheduling hiccup, the few hundred milliseconds between a pod going
-// ready and the informer noticing. It is explicitly *not* sized to absorb
-// autoscaling lag. Covering the tens of seconds it takes to start a pod, let
-// alone the minutes to provision a node, is the job of pre-provisioned capacity
-// via CapacityBuffer.
-//
-// That distinction is worth stating because it makes queue depth a diagnostic.
-// A queue that is regularly deep does not mean the queue is too small, it means
-// the buffer is. The dashboard plots both for exactly that reason.
 package placement
 
 import (
@@ -31,29 +13,13 @@ import (
 
 // Errors returned by the service.
 var (
-	// ErrAdmissionTimeout means the request waited the full admission deadline
-	// without a slot becoming free. This is the drop the objective forbids, so
-	// it is counted separately and alerted on rather than merely logged.
 	ErrAdmissionTimeout = errors.New("placement: admission deadline exceeded")
-	// ErrQueueFull means the admission queue had no room before the caller's
-	// deadline. Like a timeout, this is a drop.
-	ErrQueueFull = errors.New("placement: admission queue full")
-	// ErrShuttingDown means the service stopped while the request was waiting.
-	ErrShuttingDown = errors.New("placement: service is shutting down")
-	// ErrBootFailed means a host was chosen but the guest would not start on
-	// it, on every host tried.
-	ErrBootFailed = errors.New("placement: microVM failed to boot")
+	ErrQueueFull        = errors.New("placement: admission queue full")
+	ErrShuttingDown     = errors.New("placement: service is shutting down")
+	ErrBootFailed       = errors.New("placement: microVM failed to boot")
 )
 
 // Defaults for the admission path, derived in docs/capacity-planning.md.
-//
-// DefaultQueueDepth is about one second of arrivals at the 1000 requests per
-// second peak. At peak the fleet retires roughly 1000 microVMs per second as
-// their TTLs elapse, so a queue this deep drains in about a second even with no
-// new capacity at all, while still swallowing any plausible Poisson burst.
-//
-// DefaultAdmissionDeadline is long enough to ride out a pod that is already
-// starting, and short enough that a caller is not left hanging.
 const (
 	DefaultQueueDepth        = 1024
 	DefaultAdmissionDeadline = 3 * time.Second
@@ -62,15 +28,9 @@ const (
 
 // Config tunes the admission path.
 type Config struct {
-	// QueueDepth is the maximum number of requests waiting for a slot.
-	QueueDepth int
-	// AdmissionDeadline caps how long a single request may wait. A caller
-	// whose own context expires sooner wins.
+	QueueDepth        int
 	AdmissionDeadline time.Duration
-	// RetryInterval is the fallback poll period. Retries are normally driven
-	// by capacity-release signals; this only bounds the wait if a signal is
-	// missed, so it is a safety net rather than the primary mechanism.
-	RetryInterval time.Duration
+	RetryInterval     time.Duration
 }
 
 func (c *Config) applyDefaults() {
@@ -99,25 +59,16 @@ func (c Config) Validate() error {
 	return nil
 }
 
-// Request is a placement request. The assignment fixes the shape of every
-// request, so only identity and lifetime vary.
+// Request is a placement request.
 type Request struct {
-	// VMID uniquely identifies the microVM to create.
 	VMID string
-	// TTL is how long the microVM should live.
-	TTL time.Duration
+	TTL  time.Duration
 }
 
 // Result describes a successful placement.
 type Result struct {
-	// Host is the vmhost pod the microVM was placed on.
-	Host scheduler.HostID
-	// Wait is how long the request spent queued before it was placed. At
-	// healthy capacity this is microseconds; a rising value is the earliest
-	// warning that the fleet is falling behind.
-	Wait time.Duration
-	// Attempts is how many times placement was tried. More than one means the
-	// request had to wait for a slot to free.
+	Host     scheduler.HostID
+	Wait     time.Duration
 	Attempts int
 }
 
@@ -133,8 +84,7 @@ type Stats struct {
 	MaxQueueLen     uint64
 }
 
-// Dropped is the number of requests that never got a placement. The objective
-// requires this to be zero.
+// Dropped is the number of requests that never got a placement.
 func (s Stats) Dropped() uint64 { return s.TimedOut + s.QueueRejected + s.BootFailed }
 
 // Booter starts a microVM on the host the scheduler chose.
@@ -156,9 +106,6 @@ type Service struct {
 	booter Booter
 
 	queue chan *pending
-	// freed carries capacity-release notifications. It is depth 1 and sent to
-	// without blocking, so it coalesces: one pending wakeup is enough, and a
-	// release never waits on the dispatcher.
 	freed chan struct{}
 
 	stopped chan struct{}
@@ -187,7 +134,7 @@ type admission struct {
 	err      error
 }
 
-// New returns a Service. Start must be called before Admit.
+// New returns a Service.
 func New(sched *scheduler.Scheduler, cfg Config) (*Service, error) {
 	if sched == nil {
 		return nil, errors.New("placement: scheduler must not be nil")
@@ -206,17 +153,14 @@ func New(sched *scheduler.Scheduler, cfg Config) (*Service, error) {
 	}, nil
 }
 
-// WithBooter attaches a Booter. Without one the service only does bookkeeping,
-// which is what the simulation and the unit tests want.
+// WithBooter attaches a Booter.
 func (s *Service) WithBooter(b Booter) *Service {
 	s.booter = b
 	return s
 }
 
 // maxBootAttempts bounds how many hosts a single request will try before
-// giving up. A boot rejected because the host is already full means the
-// scheduler's view was stale, and the right response is to place elsewhere,
-// but retrying forever would let one request monopolise the dispatcher.
+// giving up.
 const maxBootAttempts = 3
 
 // Start runs the dispatcher until ctx is cancelled or Stop is called.
@@ -243,7 +187,7 @@ func (s *Service) Start(ctx context.Context) {
 	}()
 }
 
-// Stop shuts the dispatcher down and waits for it to finish. It is idempotent.
+// Stop shuts the dispatcher down and waits for it to finish.
 func (s *Service) Stop() {
 	select {
 	case <-s.stopped:
@@ -267,9 +211,6 @@ func (s *Service) drain(err error) {
 }
 
 // Admit places a microVM, waiting for capacity if necessary.
-//
-// It returns ErrQueueFull or ErrAdmissionTimeout only when the request could
-// not be placed within the deadline. Both are drops and both are counted.
 func (s *Service) Admit(ctx context.Context, req Request) (Result, error) {
 	if req.VMID == "" {
 		return Result{}, errors.New("placement: VMID must not be empty")
@@ -283,41 +224,22 @@ func (s *Service) Admit(ctx context.Context, req Request) (Result, error) {
 		req:      req,
 		ctx:      ctx,
 		enqueued: time.Now(),
-		// Buffered so the dispatcher never blocks handing back a result, even
-		// if this caller has already given up.
-		result: make(chan admission, 1),
+		result:   make(chan admission, 1),
 	}
 
 	select {
 	case s.queue <- p:
 		s.recordQueueDepth()
 	case <-ctx.Done():
-		// The queue was full for the entire deadline. Backpressure rather than
-		// an immediate rejection, which is the point: a momentarily full queue
-		// is a reason to wait, not a reason to fail.
 		s.queueRejected.Add(1)
 		return Result{}, ErrQueueFull
 	}
 
-	// Wait unconditionally for the dispatcher's verdict, rather than also
-	// selecting on ctx.Done().
-	//
-	// Racing the context here would be a slot leak: if the deadline fired at
-	// the same moment the dispatcher completed a placement, the caller would
-	// report a drop while the microVM was in fact placed, and nothing would
-	// ever release its slot. The dispatcher already enforces the same deadline
-	// and resolves every request it dequeues exactly once, so letting it be the
-	// sole authority keeps the accounting honest.
 	res := <-p.result
 	if res.err != nil {
 		return Result{}, res.err
 	}
 
-	// Boot happens here, in the caller's goroutine, deliberately outside the
-	// dispatcher. The dispatcher is serialised to keep admission strictly FIFO,
-	// and a boot is a network round trip to another pod; doing it inline would
-	// cap the whole system at one boot at a time, which at a 25 ms boot is
-	// about 40 requests per second rather than the 1000 required.
 	host := res.host
 	attempts := res.attempts
 	if s.booter != nil {
@@ -341,9 +263,6 @@ func (s *Service) bootWithRetry(ctx context.Context, p *pending, host scheduler.
 			return host, attempts, nil
 		}
 
-		// The slot was reserved for a guest that never started, so give it back
-		// before trying anywhere else. Failing to do this is how a fleet leaks
-		// capacity one failed boot at a time.
 		_ = s.sched.Release(scheduler.VMID(p.req.VMID))
 		s.signalCapacity()
 
@@ -352,8 +271,6 @@ func (s *Service) bootWithRetry(ctx context.Context, p *pending, host scheduler.
 			return "", attempts, fmt.Errorf("%w: %w", ErrBootFailed, err)
 		}
 
-		// Place again. The scheduler will pick a different host, since the one
-		// that just rejected us is now recorded as full.
 		next, perr := s.sched.Place(scheduler.VMID(p.req.VMID))
 		if perr != nil {
 			s.bootFailed.Add(1)
@@ -376,14 +293,8 @@ func (s *Service) recordQueueDepth() {
 	}
 }
 
-// dispatch resolves a single queued request, retrying until it is placed or its
-// deadline expires.
-//
-// Retrying the head of the queue rather than skipping past it is deliberate.
-// Every request has the same shape, 1 vCPU and 1 GiB, so if the head cannot be
-// placed then nothing behind it can either. Strict first in, first out costs
-// nothing here and gives predictable tail latency instead of the starvation a
-// work-stealing scheme would allow.
+// dispatch resolves a single queued request, retrying until it is placed or
+// its deadline expires.
 func (s *Service) dispatch(ctx context.Context, p *pending) {
 	attempts := 0
 	for {
@@ -404,7 +315,6 @@ func (s *Service) dispatch(ctx context.Context, p *pending) {
 			return
 		}
 
-		// No slot right now. Wait for one to be released rather than spinning.
 		timer := time.NewTimer(s.cfg.RetryInterval)
 		select {
 		case <-s.freed:
@@ -445,9 +355,6 @@ func (s *Service) signalCapacity() {
 	select {
 	case s.freed <- struct{}{}:
 	default:
-		// A wakeup is already pending. Coalescing is correct: the dispatcher
-		// re-checks capacity when it wakes, so one signal covers any number of
-		// concurrent releases and a release never blocks on the dispatcher.
 	}
 }
 

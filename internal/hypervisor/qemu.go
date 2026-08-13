@@ -18,28 +18,6 @@ import (
 
 // QEMU runs each microVM as a real QEMU guest: a separate kernel, a separate
 // address space, real virtual hardware.
-//
-// # Why QEMU here and Firecracker in production
-//
-// Firecracker requires /dev/kvm and offers no software fallback. KVM needs
-// hardware virtualisation, which on a cloud VM means nested virtualisation, and
-// on Apple Silicon means an M3 or later host. On an M1 development machine
-// there is simply no way to expose it, so Firecracker cannot run at all.
-//
-// QEMU can, because it falls back to TCG, its portable binary translator. The
-// guests are genuinely virtual machines rather than containers, which is what
-// the requirement asks for. What they are not is fast: TCG is roughly an order
-// of magnitude slower than hardware-accelerated virtualisation, so boots take
-// seconds rather than the tens of milliseconds a Firecracker snapshot restore
-// takes.
-//
-// That is the whole trade, stated plainly. This implementation proves microVMs
-// are real and that several run per pod. The fake implementation proves the
-// control plane survives 1000 requests per second. Only bare metal proves both
-// at once, and that costs money this project does not have.
-//
-// Accel picks hardware acceleration automatically when it is available, so the
-// same code path is used unchanged on a host that does have KVM.
 type QEMU struct {
 	cfg QEMUConfig
 
@@ -53,46 +31,20 @@ type QEMU struct {
 
 // QEMUConfig configures the QEMU-backed hypervisor.
 type QEMUConfig struct {
-	// Slots is the microVM capacity of this host, at least 2.
-	Slots int
-	// Binary is the qemu-system executable. Auto-detected for the host
-	// architecture when empty.
-	Binary string
-	// KernelImage is an uncompressed kernel the guest boots directly. Booting
-	// a kernel with -kernel skips firmware and bootloader entirely, which is
-	// what makes a guest this small viable at all.
+	Slots       int
+	Binary      string
 	KernelImage string
-	// InitrdImage is an initial ramdisk holding the guest userspace. This is
-	// the normal way to run a microVM this small: userspace lives entirely in
-	// memory, so there is no virtual disk to probe, no filesystem to mount and
-	// no block driver to initialise, all of which cost real time under
-	// software emulation.
 	InitrdImage string
-	// RootfsImage is an optional disk-backed root filesystem, used instead of
-	// an initrd when the guest is too large to hold in memory.
 	RootfsImage string
-	// MemMiB is guest memory. This is the real allocation, deliberately much
-	// smaller than the 1 GiB the scheduler accounts per microVM, exactly as
-	// documented in docs/capacity-planning.md.
-	MemMiB int
-	// BootTimeout bounds how long to wait for the guest's readiness marker
-	// before giving up and killing it.
+	MemMiB      int
 	BootTimeout time.Duration
-	// ReadyMarker is the console string that means the guest is up. Defaults
-	// to DefaultReadyMarker.
 	ReadyMarker string
-	// Accel overrides accelerator selection. Empty means auto-detect.
-	Accel string
+	Accel       string
 }
 
 // Defaults for the QEMU hypervisor.
 const (
-	// DefaultReadyMarker is printed by the guest init once it is running. It
-	// is the only reliable signal that the guest reached userspace, as opposed
-	// to the QEMU process merely having been spawned.
-	DefaultReadyMarker = "MICROVM_READY"
-	// DefaultQEMUBootTimeout is generous because TCG is slow, and a guest that
-	// has not reached userspace in this long is not going to.
+	DefaultReadyMarker     = "MICROVM_READY"
 	DefaultQEMUBootTimeout = 90 * time.Second
 	DefaultGuestMemMiB     = 128
 )
@@ -128,8 +80,8 @@ func (c *QEMUConfig) applyDefaults() {
 }
 
 // defaultQEMUBinary picks the emulator matching the host architecture, since a
-// guest kernel built for the host arch is the only one TCG can run at tolerable
-// speed.
+// guest kernel built for the host arch is the only one TCG can run at
+// tolerable speed.
 func defaultQEMUBinary() string {
 	switch runtime.GOARCH {
 	case "arm64":
@@ -142,8 +94,7 @@ func defaultQEMUBinary() string {
 }
 
 // detectAccel prefers hardware acceleration when the host offers it, so this
-// implementation is not permanently second class. On a KVM-capable host it is
-// a genuine microVM runner; elsewhere it degrades to TCG rather than failing.
+// implementation is not permanently second class.
 func detectAccel() string {
 	if _, err := os.Stat("/dev/kvm"); err == nil {
 		return "kvm"
@@ -218,17 +169,11 @@ func (q *QEMU) Expired() <-chan string { return q.expired }
 func (q *QEMU) Accel() string { return q.cfg.Accel }
 
 // Start boots a guest and returns once it has printed the readiness marker.
-//
-// Returning only after the marker is what makes this honest. A QEMU process
-// that has been spawned is not a running virtual machine, and reporting success
-// at spawn time would let the scheduler count capacity that cannot yet do work.
 func (q *QEMU) Start(ctx context.Context, spec Spec) (Instance, error) {
 	if err := spec.Validate(); err != nil {
 		return Instance{}, err
 	}
 
-	// Reserve the slot before the boot, so concurrent callers cannot
-	// oversubscribe the host through the boot window.
 	q.mu.Lock()
 	if q.closed {
 		q.mu.Unlock()
@@ -281,8 +226,6 @@ func (q *QEMU) Start(ctx context.Context, spec Spec) (Instance, error) {
 
 // boot launches QEMU and waits for the guest readiness marker on the console.
 func (q *QEMU) boot(ctx context.Context, spec Spec, vm *qemuVM) (Instance, error) {
-	// The guest's lifetime is owned by this context, not the caller's request
-	// context, so a returned HTTP handler does not kill a running microVM.
 	vmCtx, cancel := context.WithCancel(context.Background())
 	vm.cancel = cancel
 
@@ -329,10 +272,6 @@ func (q *QEMU) boot(ctx context.Context, spec Spec, vm *qemuVM) (Instance, error
 }
 
 // args builds the QEMU command line.
-//
-// The machine type is the minimal one for the architecture and every optional
-// device is switched off. A smaller virtual machine boots faster, which matters
-// a great deal when every instruction is being translated in software.
 func (q *QEMU) args(spec Spec) []string {
 	args := []string{
 		"-accel", q.cfg.Accel,
@@ -341,16 +280,12 @@ func (q *QEMU) args(spec Spec) []string {
 		"-kernel", q.cfg.KernelImage,
 		"-nographic",
 		"-no-reboot",
-		// No default NIC, disk controller, or serial mouse. Each one is
-		// hardware the guest kernel would otherwise probe for and time out on.
 		"-nodefaults",
 		"-serial", "stdio",
 	}
 
 	switch runtime.GOARCH {
 	case "arm64":
-		// virt is the paravirtual board; without a real CPU model TCG has to
-		// guess, and highmem off keeps the address space small.
 		args = append(args, "-machine", "virt,highmem=off", "-cpu", "cortex-a72")
 	case "amd64":
 		args = append(args, "-machine", "microvm,acpi=off,rtc=off", "-cpu", "max")
@@ -358,7 +293,6 @@ func (q *QEMU) args(spec Spec) []string {
 
 	switch {
 	case q.cfg.InitrdImage != "":
-		// Userspace in RAM. Nothing to probe, nothing to mount.
 		args = append(args,
 			"-initrd", q.cfg.InitrdImage,
 			"-append", "console="+consoleDevice()+" loglevel=3 vm_id="+spec.ID,
@@ -374,8 +308,7 @@ func (q *QEMU) args(spec Spec) []string {
 }
 
 // consoleDevice is the serial port the guest kernel logs to, which differs by
-// architecture. Getting it wrong means a silent guest and a boot that times out
-// waiting for a readiness marker that was printed somewhere we are not looking.
+// architecture.
 func consoleDevice() string {
 	if runtime.GOARCH == "arm64" {
 		return "ttyAMA0"
@@ -386,13 +319,9 @@ func consoleDevice() string {
 // awaitMarker scans guest console output for the readiness marker.
 func awaitMarker(r io.Reader, marker string) error {
 	scanner := bufio.NewScanner(r)
-	// Guest consoles can emit long lines, and a truncated line could hide the
-	// marker and cause a spurious boot timeout.
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		if strings.Contains(scanner.Text(), marker) {
-			// Keep draining in the background so a chatty guest cannot block
-			// on a full pipe once we stop reading.
 			go func() {
 				for scanner.Scan() { //nolint:revive // discard remaining output
 				}
@@ -428,9 +357,6 @@ func (q *QEMU) Stop(_ context.Context, id string) error {
 }
 
 // terminate kills the QEMU process and reaps it.
-//
-// A microVM has no graceful shutdown worth waiting for: there is no state to
-// flush, and the whole point of the model is that guests are disposable.
 func (q *QEMU) terminate(vm *qemuVM) error {
 	if vm.cancel != nil {
 		vm.cancel()
@@ -438,8 +364,6 @@ func (q *QEMU) terminate(vm *qemuVM) error {
 	if vm.cmd == nil {
 		return nil
 	}
-	// Reap the child so it does not linger as a zombie. The error is expected
-	// because we just killed it.
 	_ = vm.cmd.Wait()
 	return nil
 }
@@ -453,8 +377,6 @@ func (q *QEMU) reap(id string) {
 	}
 	vm, ok := q.running[id]
 	if !ok {
-		// Already stopped explicitly, so no notification: sending one would
-		// make the agent free the scheduler slot twice.
 		q.mu.Unlock()
 		return
 	}
@@ -469,7 +391,7 @@ func (q *QEMU) reap(id string) {
 	}
 }
 
-// Close terminates every guest. It is idempotent.
+// Close terminates every guest.
 func (q *QEMU) Close() error {
 	q.mu.Lock()
 	if q.closed {

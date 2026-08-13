@@ -11,16 +11,14 @@ import (
 	"github.com/pranav-gupta1/microvm-placement/internal/placement"
 )
 
-// doubleRamp is the shape the assignment specifies: climb to peak, fall back to
-// zero, twice back to back.
+// doubleRamp is the shape the assignment specifies: climb to peak, fall back
+// to zero, twice back to back.
 func doubleRamp(ramp time.Duration, peak float64) loadgen.Envelope {
 	return loadgen.Repeat{Inner: loadgen.Ramp{Up: ramp, Down: ramp, Peak: peak}, Times: 2}
 }
 
 // config builds a run whose timings are scaled so that pod start latency stays
-// in proportion to ramp duration. Compressing wall-clock without compressing
-// the latency the autoscaler must anticipate would make the problem trivially
-// easy and the result meaningless.
+// in proportion to ramp duration.
 func config(ramp time.Duration, peak float64, podStart time.Duration) Config {
 	return Config{
 		Envelope:        doubleRamp(ramp, peak),
@@ -117,10 +115,6 @@ func TestModestDoubleRampPlacesEverything(t *testing.T) {
 
 // TestFullDoubleRampAtPeakRPS is the assignment's actual load: 1000 requests
 // per second, two cycles, 100% placement required.
-//
-// Ramp duration is compressed relative to a production run so this completes in
-// under a minute, but the rate axis is full scale and pod start latency is
-// scaled in proportion, so the autoscaler faces the same problem shape.
 func TestFullDoubleRampAtPeakRPS(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping the full 1000 rps run in short mode")
@@ -135,7 +129,6 @@ func TestFullDoubleRampAtPeakRPS(t *testing.T) {
 	report(t, "full double ramp, 1000 rps peak", res)
 	t.Logf("  wall clock         %s", time.Since(start).Round(time.Millisecond))
 
-	// The requirement, stated plainly.
 	if res.Dropped != 0 {
 		t.Errorf("dropped %d requests, the objective requires zero", res.Dropped)
 	}
@@ -143,24 +136,17 @@ func TestFullDoubleRampAtPeakRPS(t *testing.T) {
 		t.Errorf("placement rate = %.6f, want exactly 1.0", res.PlacementRate())
 	}
 
-	// The harness must actually have delivered the load it promised, or a
-	// zero-drop result would be meaningless.
 	want := loadgen.ExpectedArrivals(cfg.Envelope, 100000)
 	if rel := math.Abs(float64(res.Offered)-want) / want; rel > 0.05 {
 		t.Errorf("offered %d requests, want about %.0f (off by %.1f%%)", res.Offered, want, rel*100)
 	}
 
-	// Little's Law: 1000 rps at a 500 ms mean TTL is about 500 concurrent
-	// microVMs. A wildly different peak means the TTL model is not being
-	// honoured and the whole sizing argument would be void.
 	if res.PeakInflight < 350 || res.PeakInflight > 750 {
 		t.Errorf("peak inflight microVMs = %d, want roughly 500", res.PeakInflight)
 	}
 }
 
 // TestFleetShrinksInTheTroughAndRecovers is the cost half of the objective.
-// Zero drops is easy if you simply never scale down, so this asserts that
-// capacity is genuinely reclaimed between the two cycles and then rebuilt.
 func TestFleetShrinksInTheTroughAndRecovers(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping the timeline-shape run in short mode")
@@ -180,8 +166,6 @@ func TestFleetShrinksInTheTroughAndRecovers(t *testing.T) {
 		t.Fatalf("timeline has only %d samples, too few to judge shape", len(res.Timeline))
 	}
 
-	// Split the timeline into first cycle, trough, and second cycle. The
-	// trough is the quarter of the run centred on the boundary between cycles.
 	total := res.Timeline[len(res.Timeline)-1].Elapsed
 	var firstPeak, troughMin, secondPeak int
 	troughMin = math.MaxInt32
@@ -208,13 +192,9 @@ func TestFleetShrinksInTheTroughAndRecovers(t *testing.T) {
 	if firstPeak == 0 || secondPeak == 0 {
 		t.Fatalf("fleet never scaled up: first peak %d, second peak %d", firstPeak, secondPeak)
 	}
-	// Capacity must actually be given back, otherwise the compute bill never
-	// falls and the idle-pod objective is unmet.
 	if troughMin >= firstPeak {
 		t.Errorf("trough held %d hosts against a first peak of %d, capacity is not being reclaimed", troughMin, firstPeak)
 	}
-	// And it must come back for the second climb, which is where a scaler that
-	// shed capacity too aggressively would start dropping.
 	if secondPeak < firstPeak/2 {
 		t.Errorf("second peak reached only %d hosts against a first peak of %d", secondPeak, firstPeak)
 	}

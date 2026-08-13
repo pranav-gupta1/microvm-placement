@@ -1,12 +1,6 @@
 package scheduler
 
 // hostSet is an unordered set of host IDs with O(1) add, remove and pick.
-//
-// A map alone would do, except that Go randomises map iteration order, which
-// would make placement non-reproducible and the tests untrustworthy. Backing
-// the set with a slice plus an index map keeps every operation constant time
-// while making the choice of host a deterministic function of the operation
-// history.
 type hostSet struct {
 	ids   []HostID
 	index map[HostID]int
@@ -27,8 +21,7 @@ func (h *hostSet) add(id HostID) {
 	h.ids = append(h.ids, id)
 }
 
-// remove deletes id by swapping the last element into its place. This is O(1)
-// and, given a fixed sequence of calls, entirely deterministic.
+// remove deletes id by swapping the last element into its place.
 func (h *hostSet) remove(id HostID) {
 	i, exists := h.index[id]
 	if !exists {
@@ -45,10 +38,6 @@ func (h *hostSet) remove(id HostID) {
 }
 
 // any returns some member of the set, or false when empty.
-//
-// It returns the last element because that pairs with swap-removal to keep the
-// slice churn local, and because a recently added host is the one most likely
-// to still be warm in the caller's connection pool.
 func (h *hostSet) any() (HostID, bool) {
 	if len(h.ids) == 0 {
 		return "", false

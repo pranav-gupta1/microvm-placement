@@ -22,8 +22,6 @@ func TestRampRateAtTriangle(t *testing.T) {
 		t.Fatalf("Duration() = %s, want %s", got, want)
 	}
 
-	// The shape is the contract: zero at both ends, peak at the apex, and
-	// linear in between.
 	assertRate(t, r, 0, 0)
 	assertRate(t, r, 5*time.Second, 500)
 	assertRate(t, r, 10*time.Second, 1000)
@@ -37,7 +35,6 @@ func TestRampRateAtTrapezoid(t *testing.T) {
 	assertRate(t, r, 0, 0)
 	assertRate(t, r, 2*time.Second, 400)
 	assertRate(t, r, 4*time.Second, 800)
-	// Every instant of the hold sits at the peak.
 	assertRate(t, r, 9*time.Second, 800)
 	assertRate(t, r, 14*time.Second, 800)
 	assertRate(t, r, 17*time.Second, 400)
@@ -52,9 +49,6 @@ func TestRampRateAtOutsideEnvelopeIsZero(t *testing.T) {
 
 func TestRampNeverExceedsPeak(t *testing.T) {
 	r := Ramp{Up: 7 * time.Second, Hold: 3 * time.Second, Down: 11 * time.Second, Peak: 1000}
-	// PeakRate is the sampler's proposal rate. If RateAt could exceed it, the
-	// thinning acceptance probability would clip above 1 and the process would
-	// quietly deliver less load than requested.
 	const steps = 5000
 	for i := 0; i <= steps; i++ {
 		at := r.Duration() * time.Duration(i) / steps
@@ -97,16 +91,11 @@ func TestRepeatPlaysCyclesBackToBack(t *testing.T) {
 		t.Fatalf("PeakRate() = %v, want %v", got, want)
 	}
 
-	// First cycle.
 	assertRate(t, r, 0, 0)
 	assertRate(t, r, 10*time.Second, 1000)
-	// The trough between the two cycles is the moment a badly tuned autoscaler
-	// scales to zero and then cannot recover for the second climb.
 	assertRate(t, r, 20*time.Second, 0)
-	// Second cycle, identical to the first.
 	assertRate(t, r, 30*time.Second, 1000)
 	assertRate(t, r, 25*time.Second, 500)
-	// The closing instant belongs to the last cycle, not to a third one.
 	assertRate(t, r, 40*time.Second, 0)
 }
 
@@ -135,7 +124,6 @@ func TestRepeatDegenerateCases(t *testing.T) {
 }
 
 func TestExpectedArrivalsMatchesAnalyticIntegral(t *testing.T) {
-	// A triangle's integral is its area: half base times height.
 	r := Ramp{Up: 10 * time.Second, Down: 10 * time.Second, Peak: 1000}
 	want := 0.5 * 20 * 1000
 
@@ -146,14 +134,12 @@ func TestExpectedArrivalsMatchesAnalyticIntegral(t *testing.T) {
 }
 
 func TestExpectedArrivalsTrapezoidAndRepeat(t *testing.T) {
-	// Area = ramps (each a triangle) plus the rectangular hold.
 	r := Ramp{Up: 4 * time.Second, Hold: 10 * time.Second, Down: 6 * time.Second, Peak: 800}
 	want := 0.5*4*800 + 10*800 + 0.5*6*800
 
 	if got := ExpectedArrivals(r, 20000); math.Abs(got-want)/want > 1e-5 {
 		t.Errorf("ExpectedArrivals(ramp) = %v, want %v", got, want)
 	}
-	// Repeating doubles the offered work.
 	if got := ExpectedArrivals(Repeat{Inner: r, Times: 2}, 40000); math.Abs(got-2*want)/(2*want) > 1e-5 {
 		t.Errorf("ExpectedArrivals(repeat) = %v, want %v", got, 2*want)
 	}

@@ -1,8 +1,5 @@
-# A single-replica Prometheus, scraping the placement API and the vmhost agents.
-#
-# No operator, no persistent volume, no alertmanager. A demo run lasts minutes
-# and the data is disposable; anything more would be infrastructure for its own
-# sake on an 8 GiB laptop.
+# A single-replica Prometheus, scraping the placement API and the vmhost
+# agents.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -19,8 +16,7 @@ kind: ClusterRole
 metadata:
   name: prometheus
 rules:
-  # Read-only discovery. Prometheus needs to find pods to scrape and nothing
-  # else, so the verbs stop at list and watch.
+  # Read-only discovery.
   - apiGroups: [""]
     resources: [nodes, nodes/metrics, services, endpoints, pods]
     verbs: [get, list, watch]
@@ -47,14 +43,11 @@ data:
   prometheus.yml: |
     global:
       # Fast, because the interesting behaviour happens over tens of seconds.
-      # A 15s default would render the ramp as four or five points.
       scrape_interval: 2s
       evaluation_interval: 2s
 
     scrape_configs:
-      # Any pod carrying prometheus.io/scrape=true. Both the placement API and
-      # the vmhost agents set it, so the fleet is discovered as it scales rather
-      # than needing a static list.
+      # Any pod carrying prometheus.io/scrape=true.
       - job_name: microvm-pods
         kubernetes_sd_configs:
           - role: pod

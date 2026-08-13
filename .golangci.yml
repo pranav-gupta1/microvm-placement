@@ -28,8 +28,7 @@ linters:
         - name: package-comments
     gosec:
       excludes:
-        # Load generation and jitter are not cryptographic. Reproducible seeded
-        # sampling is a requirement here, not a weakness.
+        # Load generation and jitter are not cryptographic.
         - G404
 
   exclusions:

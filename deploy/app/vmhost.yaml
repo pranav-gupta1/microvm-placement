@@ -1,5 +1,4 @@
-# The vmhost fleet. This is the Deployment KEDA scales and the one the
-# CapacityBuffer reserves headroom for.
+# The vmhost fleet.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,9 +6,7 @@ metadata:
   namespace: microvm
   labels: {app: vmhost}
 spec:
-  # Replicas are owned by KEDA at runtime. The value here only applies before
-  # the ScaledObject takes over, so it is set to the same floor the autoscaler
-  # uses rather than to 1.
+  # Replicas are owned by KEDA at runtime.
   replicas: 2
   selector:
     matchLabels: {app: vmhost}
@@ -24,9 +21,7 @@ spec:
       nodeSelector:
         microvm.io/role: vmhost
       # Well above the 500 ms mean microVM TTL, so a pod being scaled away
-      # always outlives the guests it is running. Combined with the scheduler
-      # moving a host to Draining rather than deleting it, this is why
-      # scale-down does not drop requests.
+      # always outlives the guests it is running.
       terminationGracePeriodSeconds: 60
       containers:
         - name: vmhostd
@@ -37,10 +32,7 @@ spec:
             - -slots=8
             - -placement-api=http://placement-api:8080
             - -heartbeat-interval=2s
-            # The fake hypervisor carries the 1000 rps scale proof. Swap to
-            # -hypervisor=qemu for the real-microVM demonstration, which runs
-            # at far smaller scale. docs/decisions/0003-virtualization.md
-            # explains why no single environment does both.
+            # The fake hypervisor carries the 1000 rps scale proof.
             - -hypervisor=fake
           env:
             # The pod name is the stable host identity the scheduler uses, and
@@ -56,8 +48,7 @@ spec:
             periodSeconds: 2
           resources:
             # 8 vCPU and 10 GiB: eight accounted microVMs at 1 GiB each plus
-            # supervisor overhead. See docs/capacity-planning.md for why we
-            # reserve nominal rather than observed guest memory.
+            # supervisor overhead.
             requests: {cpu: "8", memory: 10Gi}
             limits: {memory: 10Gi}
           securityContext:
@@ -73,8 +64,7 @@ metadata:
   labels: {app: vmhost}
 spec:
   # Headless: the placement API talks to individual pod IPs it learns from
-  # registration, never to a load-balanced VIP. Routing a boot request to a
-  # random host would defeat the scheduler entirely.
+  # registration, never to a load-balanced VIP.
   clusterIP: None
   selector: {app: vmhost}
   ports:

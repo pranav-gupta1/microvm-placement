@@ -15,20 +15,14 @@ import (
 // vmhost pod is scheduled, pulls an image and passes readiness before it can
 // serve, and a removed pod finishes the microVMs it is already running before
 // it goes away.
-//
-// The start delay is the whole reason the autoscaler needs a lead term, and
-// graceful drain is the whole reason scale-down does not drop requests. A
-// simulator that made pods appear instantly would make both look unnecessary.
 type fleet struct {
 	sched        *scheduler.Scheduler
 	svc          *placement.Service
 	slotsPerHost int
 	startLatency time.Duration
 
-	mu   sync.Mutex
-	next int
-	// draining holds hosts told to shut down, kept until their last microVM
-	// exits so their capacity is released rather than yanked.
+	mu       sync.Mutex
+	next     int
 	draining map[scheduler.HostID]struct{}
 }
 
@@ -43,8 +37,6 @@ func (f *fleet) reconcile(ctx context.Context, desired int) {
 	f.reapDrained()
 
 	snaps := f.sched.Hosts()
-	// Pods already starting count towards the target, or every sample interval
-	// during a ramp would launch another wave for capacity already on its way.
 	var live []scheduler.HostSnapshot
 	for _, h := range snaps {
 		if h.State != scheduler.HostDraining {
@@ -90,22 +82,15 @@ func (f *fleet) markReady(id scheduler.HostID) {
 	_, isDraining := f.draining[id]
 	f.mu.Unlock()
 	if isDraining {
-		// Scaled back down before it ever came up.
 		return
 	}
 	if err := f.sched.SetHostState(id, scheduler.HostReady); err != nil {
 		return
 	}
-	// New capacity is exactly the event a queued request is waiting for.
 	f.svc.SignalCapacity()
 }
 
 // drainHosts marks n pods for shutdown, emptiest first.
-//
-// Choosing the emptiest is what makes scale-down cheap. Combined with best-fit
-// placement, which concentrates load, the emptiest hosts are usually running
-// nothing at all, so they can be removed immediately and without disturbing a
-// single microVM.
 func (f *fleet) drainHosts(live []scheduler.HostSnapshot, n int) {
 	ready := make([]scheduler.HostSnapshot, 0, len(live))
 	for _, h := range live {
@@ -113,7 +98,6 @@ func (f *fleet) drainHosts(live []scheduler.HostSnapshot, n int) {
 			ready = append(ready, h)
 		}
 	}
-	// Emptiest first, then by ID so the choice is deterministic.
 	sort.Slice(ready, func(i, j int) bool {
 		if ready[i].Used != ready[j].Used {
 			return ready[i].Used < ready[j].Used
@@ -154,11 +138,9 @@ func (f *fleet) reapDrained() {
 	for _, id := range pending {
 		u, stillPresent := used[id]
 		if stillPresent && u > 0 {
-			// Still serving. Leave it alone so its microVMs run to completion.
 			continue
 		}
 		if stillPresent {
-			// Empty: safe to delete with no orphans.
 			if _, err := f.sched.RemoveHost(id); err != nil {
 				continue
 			}

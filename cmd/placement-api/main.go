@@ -1,9 +1,4 @@
 // Command placement-api is the microVM placement service.
-//
-// It accepts placement requests, assigns each to a vmhost pod, and exports the
-// desired replica count that KEDA scales the vmhost Deployment on. It holds no
-// persistent state: vmhost agents register themselves and heartbeat, so a
-// restart repopulates the fleet within one heartbeat interval.
 package main
 
 import (
@@ -86,9 +81,6 @@ func run() error {
 	slog.SetDefault(log)
 
 	reg := prometheus.NewRegistry()
-	// Go runtime and process collectors are worth having: at 1000 requests per
-	// second, GC pauses and goroutine counts are the first place to look when
-	// admission latency moves.
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	m := metrics.New(reg)
 
@@ -121,14 +113,9 @@ func run() error {
 		return fmt.Errorf("registry: %w", err)
 	}
 
-	// Cancelled by SIGINT or SIGTERM, which is what Kubernetes sends on pod
-	// deletion.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Booting is what turns a placement into a running guest. Its timeout is
-	// kept below the admission deadline so a slow agent surfaces as a retry
-	// onto another host rather than consuming the caller's whole budget.
 	svc.WithBooter(newHTTPBooter(reggy, o.bootTimeout, o.maxConns))
 
 	svc.Start(ctx)
@@ -148,11 +135,8 @@ func run() error {
 	go exporter.run(ctx)
 
 	srv := &http.Server{
-		Addr:    o.addr,
-		Handler: httpapi.New(svc, sched, m, reg, log).WithHostRegistry(reggy).Routes(),
-		// Generous relative to the admission deadline: a request legitimately
-		// blocks while waiting for capacity, and cutting it off at the HTTP
-		// layer would manufacture the very drop the queue exists to prevent.
+		Addr:              o.addr,
+		Handler:           httpapi.New(svc, sched, m, reg, log).WithHostRegistry(reggy).Routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      o.admissionDeadline + 10*time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -177,9 +161,6 @@ func run() error {
 		log.Info("shutting down")
 	}
 
-	// Drain in-flight requests before exiting. The grace period exceeds the
-	// admission deadline so a request already waiting for capacity gets its
-	// full chance rather than being dropped at the door on deploy.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), o.admissionDeadline+5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -190,9 +171,6 @@ func run() error {
 
 // signalExporter recomputes the autoscaling signal on a fixed interval and
 // publishes it, along with everything the dashboard reads.
-//
-// This is the only writer of microvm_desired_vmhost_replicas, which is the
-// series KEDA scales on.
 type signalExporter struct {
 	svc      *placement.Service
 	sched    *scheduler.Scheduler
@@ -220,9 +198,6 @@ func (e *signalExporter) step(now time.Time) {
 	svcStats := e.svc.Stats()
 	fleet := e.sched.Stats()
 
-	// Arrival rate from the delta in offered requests. Derived here rather
-	// than with a PromQL rate() so the autoscaler sees exactly the number the
-	// dashboard shows, with no window-alignment mismatch between them.
 	offered := svcStats.Accepted
 	delta := offered - e.lastOffered
 	e.lastOffered = offered
@@ -258,6 +233,5 @@ func newLogger(level string) *slog.Logger {
 	default:
 		l = slog.LevelInfo
 	}
-	// JSON so cluster log collection can parse it without a regex.
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l}))
 }
