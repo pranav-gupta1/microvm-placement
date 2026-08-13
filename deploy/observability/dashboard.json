@@ -1,0 +1,283 @@
+{
+  "title": "microVM Placement",
+  "uid": "microvm-placement",
+  "timezone": "browser",
+  "refresh": "2s",
+  "time": { "from": "now-5m", "to": "now" },
+  "editable": true,
+  "graphTooltip": 1,
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Placement rate",
+      "description": "Placed divided by offered, over the whole run. The objective is 100%.",
+      "gridPos": { "h": 4, "w": 5, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "100 * sum(microvm_requests_placed_total) / clamp_min(sum(microvm_requests_offered_total), 1)",
+          "legendFormat": "placed"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 4,
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 99.9 },
+              { "color": "green", "value": 100 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "type": "stat",
+      "title": "Dropped requests",
+      "description": "Requests that never got a placement. Any non-zero value fails the objective, so this panel is green only at exactly zero.",
+      "gridPos": { "h": 4, "w": 5, "x": 5, "y": 0 },
+      "targets": [{ "expr": "sum(microvm_requests_dropped_total)", "legendFormat": "dropped" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "type": "stat",
+      "title": "In-flight microVMs",
+      "description": "Live guests across the fleet. Little's Law predicts about 500 at 1000 rps with a 500 ms mean TTL.",
+      "gridPos": { "h": 4, "w": 4, "x": 10, "y": 0 },
+      "targets": [{ "expr": "sum(microvm_inflight_vms)", "legendFormat": "inflight" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "color": { "mode": "fixed", "fixedColor": "blue" } } },
+      "options": { "colorMode": "value", "graphMode": "area", "textMode": "value" }
+    },
+    {
+      "type": "stat",
+      "title": "Idle vmhost pods",
+      "description": "Ready pods running no microVMs at all. This is the quantity the assignment asks us to minimise, and the only thing Karpenter can consolidate away.",
+      "gridPos": { "h": 4, "w": 5, "x": 14, "y": 0 },
+      "targets": [{ "expr": "sum(microvm_vmhosts_idle)", "legendFormat": "idle" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 10 },
+              { "color": "orange", "value": 25 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "textMode": "value" }
+    },
+    {
+      "type": "stat",
+      "title": "Slot utilisation",
+      "description": "Occupied slots over ready slots. Computed from numerator and denominator rather than a precomputed ratio, so it stays correct under aggregation.",
+      "gridPos": { "h": 4, "w": 5, "x": 19, "y": 0 },
+      "targets": [
+        { "expr": "100 * sum(microvm_slots_used) / clamp_min(sum(microvm_slots_total), 1)", "legendFormat": "utilisation" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "decimals": 1, "min": 0, "max": 100 } },
+      "options": { "colorMode": "value", "graphMode": "area", "textMode": "value" }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Offered vs placed vs dropped",
+      "description": "The headline. Offered and placed should sit exactly on top of one another, and dropped should be a flat line on zero for the whole run.",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "sum(rate(microvm_requests_offered_total[10s]))", "legendFormat": "offered" },
+        { "expr": "sum(rate(microvm_requests_placed_total[10s]))", "legendFormat": "placed" },
+        { "expr": "sum(rate(microvm_requests_dropped_total[10s]))", "legendFormat": "dropped" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "dropped" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } },
+              { "id": "custom.lineWidth", "value": 3 },
+              { "id": "custom.fillOpacity", "value": 0 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "offered" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "placed" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 4] } }
+            ]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Fleet: desired vs ready vs idle",
+      "description": "The gap between desired and ready is provisioning lag, which is exactly what the autoscaler's lead term and CapacityBuffer exist to hide. Idle is what scale-down reclaims.",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "max(microvm_desired_vmhost_replicas)", "legendFormat": "desired" },
+        { "expr": "sum(microvm_vmhosts_ready)", "legendFormat": "ready" },
+        { "expr": "sum(microvm_vmhosts_pending)", "legendFormat": "pending" },
+        { "expr": "sum(microvm_vmhosts_draining)", "legendFormat": "draining" },
+        { "expr": "sum(microvm_vmhosts_idle)", "legendFormat": "idle" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never", "spanNulls": true }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "desired" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } },
+              { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 4] } }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "ready" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } },
+              { "id": "custom.fillOpacity", "value": 10 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "idle" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Placement latency",
+      "description": "End to end admission, including any time queued waiting for capacity. p50 stays in microseconds while the fleet has headroom.",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 13 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(microvm_placement_latency_seconds_bucket[30s])))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(microvm_placement_latency_seconds_bucket[30s])))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(microvm_placement_latency_seconds_bucket[30s])))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never", "spanNulls": true },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "orange", "value": 1 }] }
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Admission queue depth",
+      "description": "The queue absorbs short transients, not autoscaling lag. A persistently deep queue means the CapacityBuffer is undersized, not the queue.",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 13 },
+      "targets": [{ "expr": "sum(microvm_admission_queue_depth)", "legendFormat": "queued" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never", "gradientMode": "opacity" },
+          "color": { "mode": "fixed", "fixedColor": "yellow" }
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Underfilled pods (running exactly one microVM)",
+      "description": "The assignment requires at least two microVMs per pod. A sustained non-zero value here means the fleet is scaled wider than the load justifies.",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 13 },
+      "targets": [{ "expr": "sum(microvm_vmhosts_underfilled)", "legendFormat": "underfilled" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "never" },
+          "color": { "mode": "fixed", "fixedColor": "orange" }
+        }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "microVM boot latency by hypervisor",
+      "description": "Firecracker snapshot restore lands in tens of milliseconds; QEMU under software emulation takes seconds. Same panel, same buckets, so the difference is visible rather than asserted.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, hypervisor) (rate(microvm_boot_latency_seconds_bucket[30s])))",
+          "legendFormat": "p95 {{hypervisor}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" } }
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Slots: used vs total",
+      "description": "The area between the two lines is capacity that is provisioned and paid for but not doing work.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        { "expr": "sum(microvm_slots_total)", "legendFormat": "total" },
+        { "expr": "sum(microvm_slots_used)", "legendFormat": "used" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "total" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "purple" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "used" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+          }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+    }
+  ]
+}

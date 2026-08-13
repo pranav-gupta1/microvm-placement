@@ -1,0 +1,328 @@
+openapi: 3.1.0
+info:
+  title: microVM Placement API
+  version: 1.0.0
+  license:
+    name: MIT
+    identifier: MIT
+  description: |
+    Places microVMs onto vmhost pods.
+
+    The defining property of this API is that it does not drop requests. When no
+    slot is free, a placement request waits in a bounded admission queue until
+    capacity appears or a deadline expires. A 503 therefore means a request was
+    genuinely lost, which the system treats as a defect rather than routine
+    backpressure, and never means "busy right now, try again".
+
+    Every microVM has the same shape, 1 vCPU and 1 GiB. Requests specifying
+    anything else are rejected, because the scheduler counts uniform slots and
+    honouring heterogeneous guests would silently invalidate its accounting.
+
+servers:
+  - url: http://localhost:18080
+    description: local kind cluster via NodePort
+  - url: http://placement-api.microvm.svc.cluster.local:8080
+    description: in-cluster
+
+tags:
+  - name: placement
+    description: Creating and releasing microVMs
+  - name: fleet
+    description: vmhost membership, driven by the agents themselves
+  - name: operations
+    description: Health and metrics
+
+paths:
+  /v1/vms:
+    post:
+      tags: [placement]
+      summary: Place a microVM
+      description: |
+        Assigns a microVM to a vmhost pod and boots it there.
+
+        Blocks while waiting for capacity, up to the server's admission
+        deadline (3s by default). Clients should set a timeout comfortably
+        above that, and must not treat a slow response as a failure.
+      operationId: createVM
+      requestBody:
+        required: false
+        description: Omit entirely to accept every default.
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVMRequest'
+            examples:
+              defaults:
+                summary: Accept all defaults
+                value: {}
+              explicit:
+                summary: Caller-supplied id and lifetime
+                value: {id: "job-4711", ttl_ms: 750}
+      responses:
+        '201':
+          description: microVM placed and booted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateVMResponse'
+        '400':
+          description: |
+            Malformed body, unknown field, or a guest shape other than
+            1 vCPU / 1 GiB. Not counted as a drop.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '409':
+          description: |
+            A microVM with this caller-supplied id is already placed. The
+            client's error, so not counted as a drop.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '503':
+          description: |
+            Capacity did not arrive within the admission deadline, or the queue
+            was full for its entirety. This is a dropped request and a violation
+            of the service objective.
+          headers:
+            Retry-After:
+              schema: {type: integer}
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  /v1/vms/{id}:
+    delete:
+      tags: [placement]
+      summary: Release a microVM before its TTL expires
+      description: |
+        Frees the slot immediately. Not required in normal operation: a microVM
+        is reaped automatically when its TTL elapses and the slot is returned
+        without any client involvement.
+      operationId: deleteVM
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '204': {description: Released}
+        '404':
+          description: No such microVM
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  /v1/hosts:
+    get:
+      tags: [fleet]
+      summary: List vmhost pods and their occupancy
+      operationId: listHosts
+      responses:
+        '200':
+          description: Current fleet
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hosts:
+                    type: array
+                    items: {$ref: '#/components/schemas/Host'}
+    post:
+      tags: [fleet]
+      summary: Register a vmhost
+      description: |
+        Called by a vmhostd agent on startup. Idempotent: a repeat registration
+        is treated as a heartbeat, because an agent that restarts in place, or
+        whose first response was lost, will legitimately call this twice.
+      operationId: registerHost
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegisterHostRequest'}
+      responses:
+        '201': {description: Registered}
+        '400':
+          description: Missing id, or capacity below the two-microVM floor
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  /v1/hosts/{id}:
+    delete:
+      tags: [fleet]
+      summary: Deregister a vmhost that is shutting down cleanly
+      description: |
+        Moves the host to Draining. It stops receiving new microVMs but keeps
+        serving those it already has, so a graceful shutdown never orphans a
+        running guest.
+      operationId: deregisterHost
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '204': {description: Draining}
+        '404':
+          description: Unknown host
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  /v1/hosts/{id}/heartbeat:
+    post:
+      tags: [fleet]
+      summary: Refresh a vmhost's liveness
+      description: |
+        A host that goes silent for longer than the heartbeat timeout is
+        drained. A 404 means the placement API has forgotten this host, for
+        example after a restart, and the agent should register again rather
+        than keep heartbeating.
+      operationId: heartbeatHost
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        '204': {description: Acknowledged}
+        '404':
+          description: Unknown host; re-register
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+
+  /healthz:
+    get:
+      tags: [operations]
+      summary: Liveness
+      description: |
+        Process health only. Deliberately independent of fleet capacity: if this
+        depended on hosts existing, an empty fleet would make Kubernetes restart
+        the very component whose job is to ask for more of them.
+      operationId: healthz
+      responses:
+        '200': {description: Alive}
+
+  /readyz:
+    get:
+      tags: [operations]
+      summary: Readiness
+      description: |
+        Also independent of capacity, and for a sharper reason: agents register
+        over this same server, so withholding Service endpoints until hosts
+        exist would prevent the registrations that create them. An empty fleet
+        is a service with no capacity, not an unready one.
+      operationId: readyz
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+                  ready_hosts: {type: integer}
+                  total_hosts: {type: integer}
+                  slots_free: {type: integer}
+
+  /metrics:
+    get:
+      tags: [operations]
+      summary: Prometheus metrics
+      description: |
+        Includes `microvm_desired_vmhost_replicas`, the single unlabelled gauge
+        KEDA scales the vmhost Deployment on.
+      operationId: metrics
+      responses:
+        '200':
+          description: Prometheus text exposition
+          content:
+            text/plain: {schema: {type: string}}
+
+components:
+  schemas:
+    CreateVMRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]*$'
+          description: |
+            Optional caller-supplied identifier; generated when omitted. The
+            character set is restricted because the id reaches a guest kernel
+            command line and a filesystem path, where whitespace or a path
+            separator would be dangerous.
+        vcpus:
+          type: integer
+          enum: [1]
+          description: Must be 1 when present.
+        memory_mib:
+          type: integer
+          enum: [1024]
+          description: Must be 1024 when present.
+        ttl_ms:
+          type: integer
+          minimum: 1
+          maximum: 300000
+          default: 500
+          description: Lifetime in milliseconds. Capped so no client can pin a slot indefinitely.
+
+    CreateVMResponse:
+      type: object
+      required: [id, host, vcpus, memory_mib, ttl_ms]
+      properties:
+        id: {type: string}
+        host: {type: string, description: vmhost pod the microVM runs on}
+        vcpus: {type: integer}
+        memory_mib: {type: integer}
+        ttl_ms: {type: integer}
+        queue_wait_us:
+          type: integer
+          description: |
+            Microseconds spent queued waiting for capacity. Near zero when the
+            fleet has headroom; a rising value is the earliest signal that
+            autoscaling is falling behind.
+        attempts:
+          type: integer
+          description: Placement attempts. Above 1 means the request waited for a slot.
+
+    RegisterHostRequest:
+      type: object
+      required: [id, capacity]
+      properties:
+        id: {type: string, description: Pod name, or any stable identifier}
+        capacity:
+          type: integer
+          minimum: 2
+          description: |
+            microVM slots offered. At least 2: a pod virtualises several
+            microVMs, never one, and a misconfigured count fails loudly here
+            rather than silently degrading.
+        address:
+          type: string
+          description: host:port the placement API calls back on to boot guests.
+
+    Host:
+      type: object
+      properties:
+        id: {type: string}
+        state:
+          type: string
+          enum: [Pending, Ready, Draining]
+          description: |
+            Draining hosts keep serving existing microVMs but receive no new
+            ones, which is how scale-down avoids dropping work.
+        capacity: {type: integer}
+        used: {type: integer}
+
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+          enum: [invalid_body, invalid_request, invalid_capacity, registration_failed,
+                 duplicate_id, not_found, unknown_host, admission_timeout, queue_full,
+                 shutting_down, internal]
+        message: {type: string}

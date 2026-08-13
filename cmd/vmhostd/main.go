@@ -48,6 +48,7 @@ type options struct {
 	bootJitter        time.Duration
 	qemuBinary        string
 	kernelImage       string
+	initrdImage       string
 	rootfsImage       string
 	guestMemMiB       int
 }
@@ -65,7 +66,8 @@ func parseFlags() *options {
 	flag.DurationVar(&o.bootJitter, "fake-boot-jitter", hypervisor.DefaultBootJitter, "modelled boot jitter, fake hypervisor only")
 	flag.StringVar(&o.qemuBinary, "qemu-binary", "", "path to qemu-system binary, qemu hypervisor only. Auto-detected when empty")
 	flag.StringVar(&o.kernelImage, "kernel", "", "guest kernel path, qemu and firecracker only")
-	flag.StringVar(&o.rootfsImage, "rootfs", "", "guest root filesystem path, qemu and firecracker only")
+	flag.StringVar(&o.initrdImage, "initrd", "", "guest initramfs path, qemu only")
+	flag.StringVar(&o.rootfsImage, "rootfs", "", "guest root filesystem path, used instead of an initrd")
 	flag.IntVar(&o.guestMemMiB, "guest-mem-mib", 128, "guest memory for real hypervisors. The API accounts 1 GiB per microVM for scheduling regardless")
 	flag.Parse()
 	return o
@@ -193,6 +195,7 @@ func buildHypervisor(o *options) (hypervisor.Hypervisor, error) {
 			Slots:       o.slots,
 			Binary:      o.qemuBinary,
 			KernelImage: o.kernelImage,
+			InitrdImage: o.initrdImage,
 			RootfsImage: o.rootfsImage,
 			MemMiB:      o.guestMemMiB,
 		})

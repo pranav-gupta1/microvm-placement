@@ -62,8 +62,14 @@ type QEMUConfig struct {
 	// a kernel with -kernel skips firmware and bootloader entirely, which is
 	// what makes a guest this small viable at all.
 	KernelImage string
-	// RootfsImage is an optional root filesystem. When empty the kernel is
-	// expected to carry an embedded initramfs.
+	// InitrdImage is an initial ramdisk holding the guest userspace. This is
+	// the normal way to run a microVM this small: userspace lives entirely in
+	// memory, so there is no virtual disk to probe, no filesystem to mount and
+	// no block driver to initialise, all of which cost real time under
+	// software emulation.
+	InitrdImage string
+	// RootfsImage is an optional disk-backed root filesystem, used instead of
+	// an initrd when the guest is too large to hold in memory.
 	RootfsImage string
 	// MemMiB is guest memory. This is the real allocation, deliberately much
 	// smaller than the 1 GiB the scheduler accounts per microVM, exactly as
@@ -152,6 +158,14 @@ func (c QEMUConfig) Validate() error {
 	}
 	if c.KernelImage == "" {
 		return errors.New("qemu: KernelImage is required")
+	}
+	if c.InitrdImage == "" && c.RootfsImage == "" {
+		return errors.New("qemu: one of InitrdImage or RootfsImage is required, or the guest has no userspace to run")
+	}
+	if c.InitrdImage != "" {
+		if _, err := os.Stat(c.InitrdImage); err != nil {
+			return fmt.Errorf("qemu: initrd image %q: %w", c.InitrdImage, err)
+		}
 	}
 	if _, err := os.Stat(c.KernelImage); err != nil {
 		return fmt.Errorf("qemu: kernel image %q: %w", c.KernelImage, err)
@@ -342,17 +356,31 @@ func (q *QEMU) args(spec Spec) []string {
 		args = append(args, "-machine", "microvm,acpi=off,rtc=off", "-cpu", "max")
 	}
 
-	if q.cfg.RootfsImage != "" {
+	switch {
+	case q.cfg.InitrdImage != "":
+		// Userspace in RAM. Nothing to probe, nothing to mount.
+		args = append(args,
+			"-initrd", q.cfg.InitrdImage,
+			"-append", "console="+consoleDevice()+" loglevel=3 vm_id="+spec.ID,
+		)
+	case q.cfg.RootfsImage != "":
 		args = append(args,
 			"-drive", "file="+q.cfg.RootfsImage+",format=raw,if=none,id=root,readonly=on",
 			"-device", "virtio-blk-device,drive=root",
-			"-append", "console=ttyAMA0 root=/dev/vda ro quiet vm_id="+spec.ID,
+			"-append", "console="+consoleDevice()+" root=/dev/vda ro loglevel=3 vm_id="+spec.ID,
 		)
-	} else {
-		// Embedded initramfs: the kernel carries its own userspace.
-		args = append(args, "-append", "console=ttyAMA0 quiet vm_id="+spec.ID)
 	}
 	return args
+}
+
+// consoleDevice is the serial port the guest kernel logs to, which differs by
+// architecture. Getting it wrong means a silent guest and a boot that times out
+// waiting for a readiness marker that was printed somewhere we are not looking.
+func consoleDevice() string {
+	if runtime.GOARCH == "arm64" {
+		return "ttyAMA0"
+	}
+	return "ttyS0"
 }
 
 // awaitMarker scans guest console output for the readiness marker.
@@ -471,7 +499,10 @@ func (q *QEMU) Close() error {
 // startup logging so a misconfigured image is obvious immediately.
 func (q *QEMU) GuestArtifacts() (kernel, rootfs string) {
 	kernel = filepath.Clean(q.cfg.KernelImage)
-	if q.cfg.RootfsImage != "" {
+	switch {
+	case q.cfg.InitrdImage != "":
+		rootfs = filepath.Clean(q.cfg.InitrdImage)
+	case q.cfg.RootfsImage != "":
 		rootfs = filepath.Clean(q.cfg.RootfsImage)
 	}
 	return kernel, rootfs

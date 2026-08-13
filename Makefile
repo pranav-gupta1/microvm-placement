@@ -1,15 +1,22 @@
-GO      ?= go
-GOBIN   ?= $(shell $(GO) env GOPATH)/bin
-BIN     := bin
-PKG     := github.com/pranav-gupta1/microvm-placement
+GO       ?= go
+BIN      := bin
+CLUSTER  ?= microvm
 BINARIES := placement-api vmhostd loadgen
+
+# Peak rate for `make load`. The default is deliberately below 1000: a single
+# kind node cannot host the ~79 vmhost pods that 1000 rps needs. The full-rate
+# proof is `make test`, which drives the same scheduler, admission queue and
+# autoscaler in process. See docs/results.md.
+PEAK_RPS ?= 200
+RAMP     ?= 15s
+CYCLES   ?= 2
 
 .DEFAULT_GOAL := help
 
 ## help: list available targets
 .PHONY: help
 help:
-	@grep -hE '^## ' $(MAKEFILE_LIST) | sed 's/^## //' | awk -F': ' '{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	@grep -hE '^## ' $(MAKEFILE_LIST) | sed 's/^## //' | awk -F': ' '{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 ## build: compile all binaries into ./bin
 .PHONY: build
@@ -21,12 +28,17 @@ $(BIN)/%: FORCE
 
 FORCE:
 
-## test: run the unit tests with the race detector
+## test: unit tests with the race detector, including the full 1000 rps run
 .PHONY: test
 test:
 	$(GO) test -race ./...
 
-## cover: run tests and open a coverage report
+## test-short: skip the long end-to-end runs
+.PHONY: test-short
+test-short:
+	$(GO) test -race -short ./...
+
+## cover: test and write a coverage report
 .PHONY: cover
 cover:
 	$(GO) test -coverprofile=coverage.out ./...
@@ -34,7 +46,7 @@ cover:
 	$(GO) tool cover -html=coverage.out -o coverage.html
 	@echo "wrote coverage.html"
 
-## bench: run benchmarks for the hot-path packages
+## bench: benchmark the placement and arrival-process hot paths
 .PHONY: bench
 bench:
 	$(GO) test -run=XXX -bench=. -benchmem ./internal/scheduler/ ./internal/loadgen/
@@ -42,10 +54,7 @@ bench:
 ## lint: run golangci-lint
 .PHONY: lint
 lint:
-	@command -v golangci-lint >/dev/null 2>&1 || { \
-		echo "golangci-lint not found. Install it with:"; \
-		echo "  brew install golangci-lint"; \
-		exit 1; }
+	@command -v golangci-lint >/dev/null 2>&1 || { echo "install with: brew install golangci-lint"; exit 1; }
 	golangci-lint run
 
 ## fmt: format the tree
@@ -60,9 +69,51 @@ tidy:
 
 ## verify: everything CI runs, locally
 .PHONY: verify
-verify: fmt tidy test lint
+verify: fmt tidy lint test
+
+## demo: bring up the whole stack and run a load test
+.PHONY: demo
+demo: demo-up load
+
+## demo-up: bring up kind, Karpenter, CapacityBuffer, KEDA and the app
+.PHONY: demo-up
+demo-up:
+	@bash deploy/kind/up.sh
+
+## load: run the double-ramp load test against the local cluster
+.PHONY: load
+load: $(BIN)/loadgen
+	@mkdir -p results
+	./$(BIN)/loadgen \
+		-target http://127.0.0.1:18080 \
+		-peak-rps $(PEAK_RPS) -ramp-up $(RAMP) -ramp-down $(RAMP) \
+		-cycles $(CYCLES) -ttl 500ms \
+		-results results/run.jsonl
+
+## guest: build the QEMU guest kernel and initramfs
+.PHONY: guest
+guest:
+	$(MAKE) -C images/guest
+
+## demo-status: show what the cluster is currently doing
+.PHONY: demo-status
+demo-status:
+	@echo "--- fleet ---"
+	@curl -fsS http://127.0.0.1:18080/readyz || echo "placement API unreachable"
+	@echo "\n--- capacity buffers ---"
+	@kubectl -n microvm get capacitybuffer -o custom-columns=\
+'NAME:.metadata.name,REPLICAS:.status.replicas,STRATEGY:.status.provisioningStrategy' 2>/dev/null || true
+	@echo "--- karpenter nodes ---"
+	@kubectl get nodeclaims --no-headers 2>/dev/null | wc -l | xargs echo "nodeclaims:"
+	@echo "--- drops (must be zero) ---"
+	@curl -fsS http://127.0.0.1:18080/metrics 2>/dev/null | grep '^microvm_requests_dropped_total' || true
+
+## demo-down: delete the kind cluster
+.PHONY: demo-down
+demo-down:
+	kind delete cluster --name $(CLUSTER)
 
 ## clean: remove build and test artifacts
 .PHONY: clean
 clean:
-	rm -rf $(BIN) coverage.out coverage.html
+	rm -rf $(BIN) coverage.out coverage.html results

@@ -1,0 +1,78 @@
+# KEDA scales the vmhost Deployment to match a single number the placement API
+# computes and exports.
+#
+# # Why the intelligence is not in here
+#
+# The obvious alternative is an HPA on CPU, or a KEDA scaler with a clever
+# PromQL expression. Both put the policy in a place where it cannot be tested:
+# a PromQL string in a CRD has no unit tests, no types, and no way to assert
+# that it behaves correctly on a ramp.
+#
+# So the policy lives in Go (internal/autoscale, 100% covered) and is published
+# as one unlabelled gauge. KEDA's job is reduced to "make replicas equal this
+# number", which is a job it does reliably.
+#
+# The metric already accounts for target utilisation, so the threshold here is
+# 1: the query returns the desired replica count directly, and KEDA divides by
+# the threshold to get its target.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vmhost
+  namespace: microvm
+spec:
+  scaleTargetRef:
+    name: vmhost
+
+  # The floor is non-zero on purpose. Scaling to zero would mean the first
+  # request of a cycle waits for a pod to start, and the trough between the
+  # assignment's two load cycles would leave nothing to climb from.
+  minReplicaCount: 2
+  maxReplicaCount: 120
+
+  # KEDA's own poll interval. The placement API recomputes its signal every
+  # second, so polling faster than this buys nothing.
+  pollingInterval: 5
+  # Long enough that the trough does not trigger a teardown that cannot be
+  # rebuilt in time for the second climb. This is the outer of two
+  # stabilisation mechanisms; the inner one is in internal/autoscale, which
+  # already refuses to shrink until demand has stayed low.
+  cooldownPeriod: 60
+
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          # React immediately. Over-scaling costs money; under-scaling drops
+          # requests, and only one of those is forbidden.
+          stabilizationWindowSeconds: 0
+          policies:
+            - type: Percent
+              value: 100
+              periodSeconds: 15
+            - type: Pods
+              value: 20
+              periodSeconds: 15
+          selectPolicy: Max
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          policies:
+            # Shed at most a quarter of the fleet per minute. Draining is
+            # graceful, but removing capacity faster than microVMs retire would
+            # concentrate load onto the survivors just as they are also being
+            # asked to absorb new arrivals.
+            - type: Percent
+              value: 25
+              periodSeconds: 60
+          selectPolicy: Min
+
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.observability.svc.cluster.local:9090
+        metricName: microvm_desired_vmhost_replicas
+        # max() over the series collapses multiple placement-api replicas to a
+        # single answer. Without it, two replicas reporting the same desired
+        # count would sum to double the fleet.
+        query: max(microvm_desired_vmhost_replicas)
+        threshold: "1"
