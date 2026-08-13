@@ -37,11 +37,14 @@ kubeconfig
 kubeconfig.*
 
 # Guest kernel and root filesystem images are large build artifacts, rebuilt by
-# images/Makefile rather than tracked.
-/images/build/
+# images/guest/Makefile rather than tracked. Keep the directory itself so the
+# container build's COPY does not fail before they have been built.
+images/guest/build/*
+!images/guest/build/.gitkeep
 *.img
 *.ext4
 vmlinux*
+initramfs
 
 # Load run output
 /results/
