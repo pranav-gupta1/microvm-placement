@@ -1,0 +1,89 @@
+# Pre-provisioned spare capacity, via Karpenter's CapacityBuffer API.
+#
+# # What this buys
+#
+# KEDA can scale the vmhost Deployment the instant demand rises, but a new pod
+# is useless until a node exists to run it on, and provisioning a node takes
+# minutes. During a ramp to 1000 requests per second that gap is thousands of
+# requests. The autoscaler's lead term (internal/autoscale) predicts demand
+# ahead of time, but prediction alone cannot conjure a node.
+#
+# A CapacityBuffer closes that. It asks Karpenter to keep spare *node* capacity
+# warm ahead of the pods that will need it, so scale-up is a scheduling decision
+# rather than a provisioning one.
+#
+# # Two buffers, because the API allows exactly one selector each
+#
+# The CRD requires exactly one of podTemplateRef or scalableRef per object, so
+# the two jobs are split:
+#
+#   vmhost-ramp   percentage against the live Deployment. Scales with the fleet,
+#                 so headroom grows as load grows and costs nothing at idle.
+#   vmhost-floor  a fixed replica count against a standalone PodTemplate. Covers
+#                 t=0, when the Deployment is at its minimum and a percentage of
+#                 a small number is approximately nothing. This is what stops
+#                 the very first climb from starting cold.
+#
+# Sizing is derived in docs/capacity-planning.md and should be re-derived from
+# measured p95 provisioning latency before any production use.
+---
+apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityBuffer
+metadata:
+  name: vmhost-ramp
+  namespace: microvm
+spec:
+  # Percentage buffers only work against an object exposing a scale
+  # subresource, which a Deployment does.
+  scalableRef:
+    apiGroup: apps
+    kind: Deployment
+    name: vmhost
+  # 20% headroom. Derived from the ramp: at peak the fleet grows by roughly
+  # 125 pods per second of ramp, and a node takes on the order of a minute.
+  # Twenty percent covers the overshoot without paying for a second fleet.
+  percentage: 20
+  provisioningStrategy: active-capacity
+---
+apiVersion: autoscaling.x-k8s.io/v1beta1
+kind: CapacityBuffer
+metadata:
+  name: vmhost-floor
+  namespace: microvm
+spec:
+  # A flat floor of warm capacity for the cold start, expressed as a pod shape
+  # rather than a percentage of a Deployment that is currently tiny.
+  podTemplateRef:
+    name: vmhost-buffer-template
+  replicas: 4
+  provisioningStrategy: active-capacity
+---
+# The shape the floor buffer reserves. It mirrors the vmhost pod's requests
+# exactly; a buffer reserving a different shape than the pod that will land on
+# it reserves the wrong thing.
+apiVersion: v1
+kind: PodTemplate
+metadata:
+  name: vmhost-buffer-template
+  namespace: microvm
+template:
+  metadata:
+    labels:
+      app: vmhost
+      microvm.io/buffer: "true"
+  spec:
+    nodeSelector:
+      microvm.io/role: vmhost
+    containers:
+      - name: vmhostd
+        image: microvm/vmhostd:dev
+        resources:
+          requests:
+            cpu: "8"
+            # 8 GiB of accounted guest memory plus supervisor overhead. See the
+            # accounting note in docs/capacity-planning.md: real guest RSS is
+            # far lower, but reserving nominal is what keeps a memory spike
+            # from taking down a whole node.
+            memory: 10Gi
+          limits:
+            memory: 10Gi

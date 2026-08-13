@@ -1,0 +1,81 @@
+# The vmhost fleet. This is the Deployment KEDA scales and the one the
+# CapacityBuffer reserves headroom for.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmhost
+  namespace: microvm
+  labels: {app: vmhost}
+spec:
+  # Replicas are owned by KEDA at runtime. The value here only applies before
+  # the ScaledObject takes over, so it is set to the same floor the autoscaler
+  # uses rather than to 1.
+  replicas: 2
+  selector:
+    matchLabels: {app: vmhost}
+  template:
+    metadata:
+      labels: {app: vmhost}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      # Karpenter provisions nodes carrying this label via the vmhost NodePool.
+      nodeSelector:
+        microvm.io/role: vmhost
+      # Well above the 500 ms mean microVM TTL, so a pod being scaled away
+      # always outlives the guests it is running. Combined with the scheduler
+      # moving a host to Draining rather than deleting it, this is why
+      # scale-down does not drop requests.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vmhostd
+          image: microvm/vmhostd:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - -addr=:9090
+            - -slots=8
+            - -placement-api=http://placement-api:8080
+            - -heartbeat-interval=2s
+            # The fake hypervisor carries the 1000 rps scale proof. Swap to
+            # -hypervisor=qemu for the real-microVM demonstration, which runs
+            # at far smaller scale. docs/decisions/0003-virtualization.md
+            # explains why no single environment does both.
+            - -hypervisor=fake
+          env:
+            # The pod name is the stable host identity the scheduler uses, and
+            # the pod IP is what the placement API calls back on.
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: POD_IP
+              valueFrom: {fieldRef: {fieldPath: status.podIP}}
+          ports:
+            - {name: http, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+          resources:
+            # 8 vCPU and 10 GiB: eight accounted microVMs at 1 GiB each plus
+            # supervisor overhead. See docs/capacity-planning.md for why we
+            # reserve nominal rather than observed guest memory.
+            requests: {cpu: "8", memory: 10Gi}
+            limits: {memory: 10Gi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vmhost
+  namespace: microvm
+  labels: {app: vmhost}
+spec:
+  # Headless: the placement API talks to individual pod IPs it learns from
+  # registration, never to a load-balanced VIP. Routing a boot request to a
+  # random host would defeat the scheduler entirely.
+  clusterIP: None
+  selector: {app: vmhost}
+  ports:
+    - {name: http, port: 9090, targetPort: http}

@@ -64,7 +64,7 @@ type Fleet interface {
 // endpoints are not served, which is what the simulation and the handler tests
 // want.
 type HostRegistry interface {
-	Register(id scheduler.HostID, capacity int) error
+	Register(id scheduler.HostID, capacity int, address string) error
 	Heartbeat(id scheduler.HostID) error
 	Deregister(id scheduler.HostID) error
 }
@@ -119,6 +119,9 @@ type RegisterHostRequest struct {
 	// Capacity is how many microVM slots the agent is offering. It must be at
 	// least scheduler.MinSlotsPerHost.
 	Capacity int `json:"capacity"`
+	// Address is host:port the placement API calls back on to boot guests.
+	// Optional: an agent that only reports capacity may omit it.
+	Address string `json:"address,omitempty"`
 }
 
 func (s *Server) handleRegisterHost(w http.ResponseWriter, r *http.Request) {
@@ -129,7 +132,7 @@ func (s *Server) handleRegisterHost(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "invalid_body", err.Error())
 		return
 	}
-	if err := s.hosts.Register(scheduler.HostID(req.ID), req.Capacity); err != nil {
+	if err := s.hosts.Register(scheduler.HostID(req.ID), req.Capacity, req.Address); err != nil {
 		if errors.Is(err, scheduler.ErrInvalidCapacity) {
 			s.writeError(w, http.StatusBadRequest, "invalid_capacity", err.Error())
 			return
@@ -137,7 +140,7 @@ func (s *Server) handleRegisterHost(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "registration_failed", err.Error())
 		return
 	}
-	s.log.Info("vmhost registered", "host", req.ID, "capacity", req.Capacity)
+	s.log.Info("vmhost registered", "host", req.ID, "capacity", req.Capacity, "address", req.Address)
 	s.writeJSON(w, http.StatusCreated, map[string]any{"id": req.ID, "capacity": req.Capacity})
 }
 
@@ -344,20 +347,25 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// handleReadyz reports whether this process can serve, which deliberately does
+// not depend on how much fleet capacity exists.
+//
+// Gating readiness on ready hosts seems reasonable and deadlocks the system.
+// vmhost agents register over this same server, so a Service that withholds
+// endpoints until hosts exist prevents the very registrations that would create
+// them: no endpoints, so no agent can register, so no hosts, so never ready.
+// Observed as a stuck rollout the first time this was deployed.
+//
+// An empty fleet is not an unready service. It is a service with no capacity,
+// which the admission queue already handles by making requests wait while
+// autoscaling catches up. Capacity is reported here as information, and is
+// alerted on through microvm_vmhosts_ready rather than through readiness.
 func (s *Server) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	stats := s.fleet.Stats()
-	if stats.ReadyHosts == 0 {
-		// No host can serve a placement yet, so taking traffic would only
-		// build queue depth.
-		s.writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"status": "no ready vmhosts",
-			"hosts":  stats.Hosts,
-		})
-		return
-	}
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"status":      "ready",
 		"ready_hosts": stats.ReadyHosts,
+		"total_hosts": stats.Hosts,
 		"slots_free":  stats.Capacity - stats.Used,
 	})
 }

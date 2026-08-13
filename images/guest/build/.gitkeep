@@ -1,0 +1,1 @@
+Guest kernel and initramfs are build artifacts, not source. See images/guest/Makefile.

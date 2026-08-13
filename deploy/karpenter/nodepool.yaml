@@ -1,0 +1,72 @@
+# Karpenter node provisioning for the vmhost fleet.
+#
+# The provider here is kwok, which fabricates Node objects instead of calling a
+# cloud API. Karpenter's own scheduling, disruption, consolidation and buffer
+# logic all run for real; only the machines are simulated. See
+# docs/decisions/0004-karpenter-kwok.md for why that is the right trade for a
+# zero-budget submission, and infra/terraform/ for the EC2 equivalent.
+---
+apiVersion: karpenter.kwok.sh/v1alpha1
+kind: KWOKNodeClass
+metadata:
+  name: default
+spec: {}
+---
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: vmhost
+spec:
+  template:
+    metadata:
+      labels:
+        microvm.io/role: vmhost
+    spec:
+      nodeClassRef:
+        group: karpenter.kwok.sh
+        kind: KWOKNodeClass
+        name: default
+      # Instance families are named to mirror the metal shapes the EC2 build
+      # would use. On kwok these are labels rather than real hardware, but
+      # keeping them faithful means the NodePool transfers to the AWS provider
+      # by swapping the nodeClassRef alone.
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          # Spot first with on-demand fallback. Bare metal spot capacity is
+          # thin, so a shortfall must degrade cost rather than availability.
+          operator: In
+          values: ["spot", "on-demand"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["c6g.metal", "m6g.metal", "r6g.metal"]
+      # A microVM outlives neither its TTL nor this grace period, so a node
+      # being reclaimed always has time to drain rather than orphaning guests.
+      terminationGracePeriod: 60s
+      expireAfter: 720h
+
+  disruption:
+    # Reclaim nodes that are empty or that could be packed onto fewer nodes.
+    # This is the node-level half of the idle-minimisation objective; best-fit
+    # placement and KEDA scale-down are the pod-level half, and consolidation
+    # only has anything to work with because those two empty pods out first.
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    # Long enough that the trough between the two load cycles does not trigger
+    # a full teardown that cannot be rebuilt in time for the second climb.
+    consolidateAfter: 2m
+
+  limits:
+    # A hard ceiling on blast radius. At 8 slots per pod and ~7 pods per node,
+    # this covers well beyond the 12 nodes docs/capacity-planning.md derives
+    # for 1000 rps.
+    cpu: "1024"
+    memory: 2048Gi
+
+  # Higher weight than any future general-purpose pool, so vmhost pods land on
+  # metal rather than on whatever else is cheapest.
+  weight: 100

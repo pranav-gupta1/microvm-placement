@@ -1,0 +1,8 @@
+# Production-shaped manifests: metal-sized vmhost pods on Karpenter-provisioned
+# nodes. deploy/overlays/local shrinks these to fit a single kind node.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: microvm
+resources:
+  - placement-api.yaml
+  - vmhost.yaml

@@ -317,14 +317,18 @@ func TestHealthzIgnoresFleetState(t *testing.T) {
 	}
 }
 
+// TestReadyzDoesNotDependOnFleetCapacity is a regression test for a deadlock
+// found on first deployment. vmhost agents register over this same server, so a
+// Service that withholds endpoints until hosts exist prevents the registrations
+// that would create them, and the rollout never completes.
 func TestReadyzReflectsFleetCapacity(t *testing.T) {
-	t.Run("no ready hosts", func(t *testing.T) {
+	t.Run("ready with an empty fleet", func(t *testing.T) {
 		h, _, _ := newTestServer(t, &stubPlacer{}, &stubFleet{stats: scheduler.Stats{Hosts: 3}})
 		r := httptest.NewRequest(http.MethodGet, "/readyz", nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
-		if w.Code != http.StatusServiceUnavailable {
-			t.Errorf("status = %d with no ready hosts, want 503", w.Code)
+		if w.Code != http.StatusOK {
+			t.Errorf("status = %d with no ready hosts, want 200: readiness must not gate registration", w.Code)
 		}
 	})
 	t.Run("ready", func(t *testing.T) {

@@ -82,7 +82,7 @@ func TestNewValidation(t *testing.T) {
 func TestRegisterMakesAHostImmediatelyPlaceable(t *testing.T) {
 	r, sched, _, notifier := newRegistry(t)
 
-	if err := r.Register("vmhost-0", 8); err != nil {
+	if err := r.Register("vmhost-0", 8, "10.0.0.1:9090"); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if stats := sched.Stats(); stats.ReadyHosts != 1 || stats.Capacity != 8 {
@@ -99,14 +99,14 @@ func TestRegisterMakesAHostImmediatelyPlaceable(t *testing.T) {
 
 func TestRegisterRejectsEmptyID(t *testing.T) {
 	r, _, _, _ := newRegistry(t)
-	if err := r.Register("", 8); err == nil {
+	if err := r.Register("", 8, "10.0.0.1:9090"); err == nil {
 		t.Error("Register(\"\") error = nil, want non-nil")
 	}
 }
 
 func TestRegisterRejectsCapacityBelowTheTwoVMFloor(t *testing.T) {
 	r, _, _, _ := newRegistry(t)
-	if err := r.Register("vmhost-0", 1); !errors.Is(err, scheduler.ErrInvalidCapacity) {
+	if err := r.Register("vmhost-0", 1, "10.0.0.1:9090"); !errors.Is(err, scheduler.ErrInvalidCapacity) {
 		t.Errorf("Register(capacity=1) error = %v, want ErrInvalidCapacity", err)
 	}
 	// A rejected registration must not leave the host tracked, or the sweeper
@@ -123,7 +123,7 @@ func TestRepeatedRegistrationIsIdempotent(t *testing.T) {
 	r, sched, _, _ := newRegistry(t)
 
 	for i := 0; i < 3; i++ {
-		if err := r.Register("vmhost-0", 8); err != nil {
+		if err := r.Register("vmhost-0", 8, "10.0.0.1:9090"); err != nil {
 			t.Fatalf("Register() attempt %d error = %v", i, err)
 		}
 	}
@@ -134,7 +134,7 @@ func TestRepeatedRegistrationIsIdempotent(t *testing.T) {
 
 func TestHeartbeatKeepsAHostAlive(t *testing.T) {
 	r, sched, clock, _ := newRegistry(t)
-	if err := r.Register("vmhost-0", 8); err != nil {
+	if err := r.Register("vmhost-0", 8, "10.0.0.1:9090"); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestHeartbeatFromUnknownHost(t *testing.T) {
 // microVMs would be orphaned and their slots leaked.
 func TestSilentHostIsDrainedNotDeleted(t *testing.T) {
 	r, sched, clock, _ := newRegistry(t)
-	if err := r.Register("vmhost-0", 8); err != nil {
+	if err := r.Register("vmhost-0", 8, "10.0.0.1:9090"); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if _, err := sched.Place("vm-1"); err != nil {
@@ -196,7 +196,7 @@ func TestSilentHostIsDrainedNotDeleted(t *testing.T) {
 
 func TestDrainedHostIsRemovedOnceEmpty(t *testing.T) {
 	r, sched, clock, _ := newRegistry(t)
-	if err := r.Register("vmhost-0", 8); err != nil {
+	if err := r.Register("vmhost-0", 8, "10.0.0.1:9090"); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if _, err := sched.Place("vm-1"); err != nil {
@@ -224,7 +224,7 @@ func TestDrainedHostIsRemovedOnceEmpty(t *testing.T) {
 
 func TestDeregisterDrainsGracefully(t *testing.T) {
 	r, sched, _, _ := newRegistry(t)
-	if err := r.Register("vmhost-0", 8); err != nil {
+	if err := r.Register("vmhost-0", 8, "10.0.0.1:9090"); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
 	if _, err := sched.Place("vm-1"); err != nil {
@@ -287,7 +287,7 @@ func TestConcurrentRegistrationAndSweep(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			id := scheduler.HostID("vmhost-" + string(rune('a'+i%26)) + string(rune('0'+i/26)))
-			_ = r.Register(id, 8)
+			_ = r.Register(id, 8, "10.0.0.1:9090")
 			_ = r.Heartbeat(id)
 		}(i)
 	}

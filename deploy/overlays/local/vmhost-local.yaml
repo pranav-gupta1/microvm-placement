@@ -1,0 +1,12 @@
+# Shrink vmhost pods to fit a single kind node, and let them run on the system
+# node since no Karpenter-provisioned node here can actually execute a
+# container. Slot count stays at 8, so "several microVMs per pod" is unchanged.
+- op: replace
+  path: /spec/template/spec/containers/0/resources
+  value:
+    requests: {cpu: 60m, memory: 48Mi}
+    limits: {memory: 96Mi}
+- op: replace
+  path: /spec/template/spec/nodeSelector
+  value:
+    microvm.io/role: system

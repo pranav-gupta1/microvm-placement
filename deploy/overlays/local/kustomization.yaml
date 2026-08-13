@@ -1,0 +1,19 @@
+# Local overlay for the kind demo.
+#
+# The production vmhost pod asks for 8 vCPU and 10 GiB, which is one pod per
+# metal node and far more than a single kind node can offer. Here the pods are
+# shrunk so that many of them genuinely run, which keeps the whole placement
+# path real: real pods, real registration, real HTTP, real scheduling.
+#
+# What is NOT real locally is the machine underneath. Karpenter still runs its
+# full provisioning and consolidation logic, but its kwok provider fabricates
+# Node objects instead of launching hardware. See
+# docs/decisions/0004-karpenter-kwok.md.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: microvm
+resources:
+  - ../../app
+patches:
+  - path: vmhost-local.yaml
+    target: {kind: Deployment, name: vmhost}

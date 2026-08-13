@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: placement-api
+  namespace: microvm
+  labels: {app: placement-api}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: placement-api}
+  template:
+    metadata:
+      labels: {app: placement-api}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      # The control plane runs on the system node, not on vmhost capacity.
+      # Sharing would make the placement API compete with the microVMs it is
+      # trying to place, precisely when load is highest.
+      nodeSelector:
+        microvm.io/role: system
+      containers:
+        - name: placement-api
+          image: microvm/placement-api:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - -addr=:8080
+            - -slots-per-host=8
+            - -target-utilisation=0.8
+            - -mean-ttl=500ms
+            # On kwok a node appears in seconds rather than minutes, so the
+            # lead term is tuned to the provisioning latency this environment
+            # actually exhibits. On EC2 metal this is minutes, and getting it
+            # from measurement rather than a guess is the whole point.
+            - -provision-latency=5s
+            - -scale-down-window=20s
+            - -min-replicas=2
+            - -max-replicas=120
+            - -queue-depth=2048
+            - -admission-deadline=3s
+            - -sample-interval=1s
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 2
+          livenessProbe:
+            # Liveness deliberately hits /healthz, not /readyz. An empty fleet
+            # makes the service unready but not unhealthy, and restarting it
+            # would kill the component whose job is to ask for more capacity.
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 500m, memory: 256Mi}
+            limits: {memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: placement-api
+  namespace: microvm
+  labels: {app: placement-api}
+spec:
+  type: NodePort
+  selector: {app: placement-api}
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      # Mapped to host port 18080 by deploy/kind/cluster.yaml, so the load
+      # generator can offer load over a real network path from the host.
+      nodePort: 30080

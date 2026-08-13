@@ -94,6 +94,10 @@ type Registry struct {
 
 	mu       sync.Mutex
 	lastSeen map[scheduler.HostID]time.Time
+	// address is where each host can be reached to boot guests. Kept here
+	// rather than in the scheduler, which is deliberately free of transport
+	// concerns.
+	address map[scheduler.HostID]string
 }
 
 // New returns a Registry.
@@ -110,6 +114,7 @@ func New(sched *scheduler.Scheduler, notifier Notifier, cfg Config) (*Registry, 
 		sched:    sched,
 		notifier: notifier,
 		lastSeen: make(map[scheduler.HostID]time.Time),
+		address:  make(map[scheduler.HostID]string),
 	}, nil
 }
 
@@ -120,7 +125,7 @@ func New(sched *scheduler.Scheduler, notifier Notifier, cfg Config) (*Registry, 
 // vmhostd that restarts in place, or one whose first response was lost, will
 // legitimately call this twice. Making it idempotent removes a whole class of
 // startup race from the agent.
-func (r *Registry) Register(id scheduler.HostID, capacity int) error {
+func (r *Registry) Register(id scheduler.HostID, capacity int, address string) error {
 	if id == "" {
 		return errors.New("registry: host id must not be empty")
 	}
@@ -128,6 +133,9 @@ func (r *Registry) Register(id scheduler.HostID, capacity int) error {
 	r.mu.Lock()
 	_, known := r.lastSeen[id]
 	r.lastSeen[id] = r.cfg.Now()
+	if address != "" {
+		r.address[id] = address
+	}
 	r.mu.Unlock()
 
 	if known {
@@ -139,6 +147,7 @@ func (r *Registry) Register(id scheduler.HostID, capacity int) error {
 		if !errors.Is(err, scheduler.ErrDuplicateHost) {
 			r.mu.Lock()
 			delete(r.lastSeen, id)
+			delete(r.address, id)
 			r.mu.Unlock()
 			return err
 		}
@@ -175,6 +184,7 @@ func (r *Registry) Deregister(id scheduler.HostID) error {
 	r.mu.Lock()
 	_, known := r.lastSeen[id]
 	delete(r.lastSeen, id)
+	delete(r.address, id)
 	r.mu.Unlock()
 
 	if !known {
@@ -199,6 +209,7 @@ func (r *Registry) Sweep() int {
 	}
 	for _, id := range expired {
 		delete(r.lastSeen, id)
+		delete(r.address, id)
 	}
 	r.mu.Unlock()
 
@@ -244,6 +255,14 @@ func (r *Registry) Run(done <-chan struct{}) {
 			r.Sweep()
 		}
 	}
+}
+
+// Address returns where a host can be reached to boot guests.
+func (r *Registry) Address(id scheduler.HostID) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	a, ok := r.address[id]
+	return a, ok
 }
 
 // Tracked returns how many hosts are currently sending heartbeats.
