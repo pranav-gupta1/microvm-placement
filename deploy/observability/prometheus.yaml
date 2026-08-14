@@ -43,8 +43,8 @@ data:
   prometheus.yml: |
     global:
       # Fast, because the interesting behaviour happens over tens of seconds.
-      scrape_interval: 2s
-      evaluation_interval: 2s
+      scrape_interval: 10s
+      evaluation_interval: 10s
 
     scrape_configs:
       # Any pod carrying prometheus.io/scrape=true.

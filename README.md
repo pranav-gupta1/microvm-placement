@@ -30,18 +30,24 @@ host-seconds       1638.0  (idle 503.0, 30.7%)
 admission wait     p50 14.9us  p99 445.9ms
 ```
 
-The same system deployed on Kubernetes, over real HTTP, real pods, real
-registration:
+The same rate on Kubernetes, over real HTTP, real pods, real registration, with
+the load generator running inside the cluster:
 
 ```
-offered            6087
-placed             6087  (100.0000%)
+offered            120135
+placed             120135  (100.0000%)
 dropped (503)      0
-latency            p50 26.7ms  p95 35.6ms  p99 36.8ms
+transport errors   0
+latency            p50 28.2ms  p95 373.9ms  p99 1.04s
+
+peak ready vmhosts      22      (KEDA scaled 14 -> 26 -> 16 during the run)
+peak inflight microVMs  562
 ```
 
-Peak concurrency landing on 500 is a useful independent check: Little's Law
-predicts exactly 500 from 1000 requests per second at a 500 ms mean lifetime.
+Both runs are the full 1000 requests per second double ramp the assignment
+specifies. Peak concurrency landing near 500 is a useful independent check:
+Little's Law predicts exactly 500 from 1000 requests per second at a 500 ms
+mean lifetime.
 
 ## Two assumptions, stated up front
 
@@ -75,7 +81,7 @@ code as three implementations of one interface.
 | Implementation | Proves | Scale | Runs on |
 |---|---|---|---|
 | `fake` | 1000 rps, 100% placement, zero drops | 500 concurrent | anywhere |
-| `qemu` | genuinely virtual machines, several per pod | 6 to 12 | any Linux host |
+| `qemu` | genuinely virtual machines, several per pod | 3 verified | any Linux host |
 | `firecracker` | the production path, snapshot restore | 500+ | bare metal only |
 
 Firecracker requires `/dev/kvm` and has no software fallback. KVM needs hardware
@@ -151,8 +157,9 @@ Kubernetes will fail its own health timeouts.
 
 ```sh
 make test          # unit tests with the race detector
-make demo          # kind cluster, Karpenter, the app, and a load run
+make demo          # kind cluster, Karpenter, the app, and the full 1000 rps run
 make bench         # scheduler and arrival-process hot paths
+make guest         # build the QEMU guest kernel for the real-microVM demo
 ```
 
 The full 1000 rps proof runs in CI on every push. It is skipped only under

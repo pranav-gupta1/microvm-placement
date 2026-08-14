@@ -6,7 +6,7 @@ PLATFORM ?= linux/arm64
 
 .DEFAULT_GOAL := all
 
-# # all: build the guest kernel and initramfs into build/.
+## all: build the guest kernel and initramfs into build/.
 .PHONY: all
 all: $(BUILD)/vmlinuz
 
@@ -19,7 +19,7 @@ $(BUILD)/vmlinuz: Dockerfile
 		-f Dockerfile .
 	@ls -lh $(BUILD)
 
-# # clean: remove built artifacts.
+## clean: remove built artifacts.
 .PHONY: clean
 clean:
 	rm -rf $(BUILD)/vmlinuz $(BUILD)/initramfs

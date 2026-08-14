@@ -1,0 +1,21 @@
+# The placement API is the one component that must not be starved at full rate.
+# At peak it fields 1000 admissions per second and issues 1000 boot calls.
+- op: replace
+  path: /spec/template/spec/containers/0/resources
+  value:
+    requests: {cpu: "2", memory: 512Mi}
+    limits: {memory: 1Gi}
+- op: replace
+  path: /spec/template/spec/containers/0/args
+  value:
+    - -addr=:8080
+    - -slots-per-host=32
+    - -target-utilisation=0.8
+    - -mean-ttl=500ms
+    - -provision-latency=5s
+    - -scale-down-window=20s
+    - -min-replicas=2
+    - -max-replicas=32
+    - -queue-depth=4096
+    - -admission-deadline=5s
+    - -sample-interval=1s

@@ -31,27 +31,70 @@ Ramp duration is compressed so the test finishes in half a minute, but the rate
 axis is full scale and pod-start latency is scaled in proportion, so the
 autoscaler faces the same problem shape.
 
-## 2. On Kubernetes: real pods, real HTTP, 100% placement
+## 2. On Kubernetes: the same rate, real pods, real HTTP
 
-`make demo`. kind, Karpenter with CapacityBuffer, KEDA, 24 vmhost pods, load
-offered from the host over a NodePort.
+`make demo`. kind, Karpenter with CapacityBuffer, KEDA, and a load generator
+running as a Job inside the cluster.
 
 ```
-offered            6087
-placed             6087  (100.0000%)
+offered            120135
+placed             120135  (100.0000%)
 dropped (503)      0
 transport errors   0
-peak in-flight     13
-latency            p50 26.698ms  p95 35.641ms  p99 36.79ms  max 41.194ms
+peak in-flight     748
+latency            p50 28.189ms  p95 373.868ms  p99 1.043499s  max 2.509451s
+duration           3m59s
 ```
 
-Peak here is **200 rps, not 1000**. A single kind node with 4 CPUs cannot host
-the ~79 vmhost pods that 1000 rps requires. The full-rate proof is section 1,
-against the same scheduler and admission queue. Inflating this number by giving
-each pod hundreds of slots would have made it meaningless.
+Server-side counters agree exactly:
 
-The p50 of 26.7 ms is the fake hypervisor's modelled 25 ms boot plus a network
-round trip, so it measures the placement path rather than the queue.
+```
+microvm_requests_offered_total                            120135
+microvm_requests_placed_total                             120135
+microvm_requests_dropped_total{reason="admission_timeout"}     0
+microvm_requests_dropped_total{reason="queue_full"}            0
+```
+
+KEDA scaled the fleet up and back down while the ramp ran, driven by the gauge
+the placement API exports:
+
+```
+New size: 14 -> 20 -> 26    reason: external metric above target
+New size: 19 -> 22 -> 16    reason: all metrics below target
+
+peak ready vmhosts      22
+peak slots              704
+peak inflight microVMs  562
+```
+
+562 concurrent microVMs against the 500 Little's Law predicts from 1000 rps and
+a 500 ms mean lifetime. The 12% excess is Poisson burstiness, which is the
+reason the target utilisation is 80% rather than 100%.
+
+### Two failures on the way to this number
+
+The first attempt at full rate ran the generator on the host and used the
+production shape of 8 slots per pod, so 79 pods. It killed the cluster:
+
+```
+offered            120135
+placed             2760  (2.2974%)
+transport errors   117375
+```
+
+Two separate causes, both worth recording.
+
+Driving 1000 requests per second from the host goes through kind's published
+port, which is a userland TCP proxy. At a thousand new connections a second it
+saturates, and the signature is unmistakable: 117,375 transport errors with
+**zero** server-side drops, meaning the requests never reached the service at
+all. Moving the generator inside the cluster removed the proxy from the path.
+
+Separately, 79 pods on one kind node means 79 kubelet lifecycles and 79
+Prometheus scrape targets inside a 5 GiB VM, which OOM-killed the Docker daemon.
+The assignment sets no maximum microVMs per pod, only a floor of two, so the
+same 625 slots now come from 20 pods of 32 instead. Scrape interval went from 2s
+to 10s at the same time.
 
 ## 3. Real microVMs, three in one pod
 

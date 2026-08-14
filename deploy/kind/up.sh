@@ -104,14 +104,14 @@ helm upgrade --install keda kedacore/keda \
 
 log "building application images"
 pushd "${REPO_ROOT}" >/dev/null
-for binary in placement-api vmhostd; do
+for binary in placement-api vmhostd loadgen; do
   target=service
   [[ "${binary}" == vmhostd ]] && target=vmhostd
   DOCKER_BUILDKIT=1 docker build \
     --target "${target}" --build-arg BINARY="${binary}" \
     -t "microvm/${binary}:dev" -f images/Dockerfile . >/dev/null
 done
-kind load docker-image microvm/placement-api:dev microvm/vmhostd:dev --name "${CLUSTER}" >/dev/null
+kind load docker-image microvm/placement-api:dev microvm/vmhostd:dev microvm/loadgen:dev --name "${CLUSTER}" >/dev/null
 
 log "deploying observability"
 kubectl apply -f deploy/observability/prometheus.yaml >/dev/null

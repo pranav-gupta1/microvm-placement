@@ -7,3 +7,5 @@ resources:
 patches:
   - path: vmhost-local.yaml
     target: {kind: Deployment, name: vmhost}
+  - path: placement-api-local.yaml
+    target: {kind: Deployment, name: placement-api}

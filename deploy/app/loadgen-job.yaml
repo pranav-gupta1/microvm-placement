@@ -1,0 +1,44 @@
+# The load generator, running inside the cluster.
+#
+# This is not a convenience. Driving 1000 requests per second from the host goes
+# through kind's published port, which is a userland TCP proxy process, and at
+# a thousand new connections a second it becomes the bottleneck rather than the
+# system under test. The first full-rate attempt from the host produced 117,375
+# transport errors and zero server-side drops, which is the signature of a
+# saturated proxy rather than a saturated placement service.
+#
+# In-cluster, the generator talks to the Service directly over pod networking,
+# so the measurement is of the placement path and nothing else.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loadgen
+  namespace: microvm
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: {app: loadgen}
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        microvm.io/role: system
+      containers:
+        - name: loadgen
+          image: microvm/loadgen:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - -target=http://placement-api:8080
+            - -peak-rps=1000
+            - -ramp-up=60s
+            - -ramp-down=60s
+            - -cycles=2
+            - -ttl=500ms
+            # One connection per expected in-flight request. Too few and the
+            # generator serialises behind its own pool instead of offering the
+            # load the envelope calls for.
+            - -max-conns=1024
+            - -timeout=30s
+          resources:
+            requests: {cpu: 500m, memory: 256Mi}
+            limits: {memory: 768Mi}

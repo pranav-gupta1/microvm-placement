@@ -1,12 +1,29 @@
-# Shrink vmhost pods to fit a single kind node, and let them run on the system
-# node since no Karpenter-provisioned node here can actually execute a
-# container.
+# Shrink vmhost pods so the fleet fits on a single kind node, and widen each one
+# so the fleet is small in pod count.
+#
+# 1000 requests per second needs 625 slots. At the production 8 slots per pod
+# that is 79 pods, and 79 pods on one kind node means 79 kubelet lifecycles, 79
+# Prometheus scrape targets and 79 container runtimes competing inside a 5 GiB
+# VM. The first attempt at that shape OOM-killed the Docker daemon.
+#
+# The assignment sets no maximum microVMs per pod, only a floor of two, so the
+# same 625 slots are provided by 20 pods of 32. The production manifest keeps 8
+# because on real metal the blast radius of losing one pod matters more than the
+# pod count does.
 - op: replace
   path: /spec/template/spec/containers/0/resources
   value:
-    requests: {cpu: 60m, memory: 48Mi}
-    limits: {memory: 96Mi}
+    requests: {cpu: 100m, memory: 48Mi}
+    limits: {memory: 128Mi}
 - op: replace
   path: /spec/template/spec/nodeSelector
   value:
     microvm.io/role: system
+- op: replace
+  path: /spec/template/spec/containers/0/args
+  value:
+    - -addr=:9090
+    - -slots=32
+    - -placement-api=http://placement-api:8080
+    - -heartbeat-interval=2s
+    - -hypervisor=fake
