@@ -38,10 +38,10 @@ offered            120135
 placed             120135  (100.0000%)
 dropped (503)      0
 transport errors   0
-latency            p50 28.2ms  p95 373.9ms  p99 1.04s
+latency            p50 26.6ms  p95 35.7ms  p99 48.3ms
 
-peak ready vmhosts      22      (KEDA scaled 14 -> 26 -> 16 during the run)
-peak inflight microVMs  562
+peak ready vmhosts      22      (KEDA scaled 19 -> 32 -> 21 during the run)
+peak inflight microVMs  544
 ```
 
 Both runs are the full 1000 requests per second double ramp the assignment

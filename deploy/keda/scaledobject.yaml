@@ -9,9 +9,19 @@ spec:
   scaleTargetRef:
     name: vmhost
 
-  # The floor is non-zero on purpose.
-  minReplicaCount: 2
-  maxReplicaCount: 120
+  # The floor is non-zero on purpose, and higher than a single pod.
+  #
+  # Scaling to zero would mean the first request of a cycle waits for a pod to
+  # start. Beyond that, a cold fleet cannot track the first 60 second ramp to
+  # 1000 rps: starting from 8 pods produced client-side timeouts while KEDA
+  # caught up, and starting from 12 did not. This is the same headroom argument
+  # CapacityBuffer makes at the node level, applied to pods.
+  minReplicaCount: 12
+  # Bounded by what one kind node will admit. kubelet caps a node at 110 pods
+  # and the system namespaces already hold about twenty, so a higher ceiling
+  # would leave pods Pending and manufacture the drops this run disproves.
+  # On real metal this would be the 120 the capacity plan derives.
+  maxReplicaCount: 32
 
   # KEDA's own poll interval.
   pollingInterval: 5

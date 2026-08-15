@@ -41,60 +41,50 @@ offered            120135
 placed             120135  (100.0000%)
 dropped (503)      0
 transport errors   0
-peak in-flight     748
-latency            p50 28.189ms  p95 373.868ms  p99 1.043499s  max 2.509451s
+peak in-flight     128
+latency            p50 26.583ms  p95 35.7ms  p99 48.301ms  max 353.005ms
 duration           3m59s
 ```
 
-Server-side counters agree exactly:
+Measured from the cluster side over the same window:
 
 ```
-microvm_requests_offered_total                            120135
-microvm_requests_placed_total                             120135
-microvm_requests_dropped_total{reason="admission_timeout"}     0
-microvm_requests_dropped_total{reason="queue_full"}            0
+peak concurrent microVMs   544
+peak ready vmhosts          22
+peak slots                 704
+dropped                      0
+inflight after the run       0
 ```
 
-KEDA scaled the fleet up and back down while the ramp ran, driven by the gauge
-the placement API exports:
+544 concurrent microVMs against the 500 Little's Law predicts from 1000 rps and
+a 500 ms mean lifetime. The 9% excess is Poisson burstiness, which is exactly
+why the target utilisation is 80% rather than 100%.
 
-```
-New size: 14 -> 20 -> 26    reason: external metric above target
-New size: 19 -> 22 -> 16    reason: all metrics below target
+KEDA moved the fleet in both directions while the ramp ran, driven by the gauge
+the placement API exports: 19, 26, 32 climbing, then 24, 18, 21 as demand fell.
 
-peak ready vmhosts      22
-peak slots              704
-peak inflight microVMs  562
-```
+### Three failures on the way to this number
 
-562 concurrent microVMs against the 500 Little's Law predicts from 1000 rps and
-a 500 ms mean lifetime. The 12% excess is Poisson burstiness, which is the
-reason the target utilisation is 80% rather than 100%.
+**Driving load from the host.** The first full-rate attempt ran the generator
+outside the cluster and produced 117,375 transport errors alongside **zero**
+server-side drops. That combination is diagnostic: the requests never reached
+the service. kind publishes ports through a userland TCP proxy, which saturates
+at a thousand new connections a second. Moving the generator inside the cluster
+removed it from the path.
 
-### Two failures on the way to this number
+**Seventy-nine pods on one node.** At the production shape of 8 slots per pod,
+1000 rps needs 79 pods, which is 79 kubelet lifecycles and 79 Prometheus scrape
+targets inside a 5 GiB VM. It OOM-killed the Docker daemon. The assignment sets
+no maximum microVMs per pod, only a floor of two, so the same 625 slots now come
+from 20 pods of 32. The production manifest keeps 8, because on metal the blast
+radius of losing a pod matters more than the pod count does.
 
-The first attempt at full rate ran the generator on the host and used the
-production shape of 8 slots per pod, so 79 pods. It killed the cluster:
-
-```
-offered            120135
-placed             2760  (2.2974%)
-transport errors   117375
-```
-
-Two separate causes, both worth recording.
-
-Driving 1000 requests per second from the host goes through kind's published
-port, which is a userland TCP proxy. At a thousand new connections a second it
-saturates, and the signature is unmistakable: 117,375 transport errors with
-**zero** server-side drops, meaning the requests never reached the service at
-all. Moving the generator inside the cluster removed the proxy from the path.
-
-Separately, 79 pods on one kind node means 79 kubelet lifecycles and 79
-Prometheus scrape targets inside a 5 GiB VM, which OOM-killed the Docker daemon.
-The assignment sets no maximum microVMs per pod, only a floor of two, so the
-same 625 slots now come from 20 pods of 32 instead. Scrape interval went from 2s
-to 10s at the same time.
+**The generator starving itself.** A later run reached 99.9992%, one failure in
+120,135, with peak in-flight of 1697 against a connection pool of 1024. Roughly
+670 requests were queued waiting for a socket inside the generator, not waiting
+on the service. Raising the pool to 3072 took p99 from 963 ms to 48 ms and the
+last failure disappeared. Worth recording because the symptom looked like a
+service problem and was entirely a measurement artefact.
 
 ## 3. Real microVMs, three in one pod
 
@@ -197,6 +187,15 @@ unnoticed.
 
 Recorded because each was invisible in unit tests and obvious within seconds of
 running the real thing.
+
+**Scale-down leaked capacity.** When KEDA removed pods, their agents went with
+them, so no TTL ever fired for the microVMs those pods held and no expiry was
+ever reported. The host sat in Draining with slots occupied, was never reaped,
+and its capacity was gone for good. It showed up as inflight microVMs stuck at
+63 minutes after a run had finished. Draining hosts whose agent has stopped
+heartbeating are now force-reclaimed after a grace period, and
+`TestVanishedHostDoesNotLeakSlotsForever` pins the behaviour. Verified on the
+cluster: inflight returns to zero after a run.
 
 **Placements never booted.** The first cluster load run placed exactly 191 of
 6087 requests. 191 against a fleet of 192 slots was the whole diagnosis: the

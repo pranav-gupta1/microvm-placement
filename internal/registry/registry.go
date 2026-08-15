@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pranav-gupta1/microvm-placement/internal/scheduler"
@@ -64,11 +65,29 @@ type Registry struct {
 	cfg      Config
 	sched    *scheduler.Scheduler
 	notifier Notifier
+	orphaned atomic.Uint64
 
 	mu       sync.Mutex
 	lastSeen map[scheduler.HostID]time.Time
 	address  map[scheduler.HostID]string
+	// drainingSince records when a host began draining, so one whose agent has
+	// gone away can eventually be force-removed rather than holding its slots
+	// for ever.
+	drainingSince map[scheduler.HostID]time.Time
 }
+
+// ForceRemoveAfter bounds how long a draining host may hold slots once its
+// agent has stopped heartbeating.
+//
+// A pod deleted by a scale-down takes its agent with it, so no TTL will ever
+// fire for the microVMs it was running and no expiry will ever be reported.
+// Without this the host sits in Draining with Used above zero, is never reaped,
+// and its slots leak permanently. Observed as inflight microVMs sticking at a
+// non-zero floor long after a load run had finished.
+//
+// The grace period is generous because the normal path is for guests to expire
+// on their own. This only catches the case where nothing is left to expire them.
+const ForceRemoveAfter = 30 * time.Second
 
 // New returns a Registry.
 func New(sched *scheduler.Scheduler, notifier Notifier, cfg Config) (*Registry, error) {
@@ -80,11 +99,12 @@ func New(sched *scheduler.Scheduler, notifier Notifier, cfg Config) (*Registry, 
 		return nil, err
 	}
 	return &Registry{
-		cfg:      cfg,
-		sched:    sched,
-		notifier: notifier,
-		lastSeen: make(map[scheduler.HostID]time.Time),
-		address:  make(map[scheduler.HostID]string),
+		cfg:           cfg,
+		sched:         sched,
+		notifier:      notifier,
+		lastSeen:      make(map[scheduler.HostID]time.Time),
+		address:       make(map[scheduler.HostID]string),
+		drainingSince: make(map[scheduler.HostID]time.Time),
 	}, nil
 }
 
@@ -147,6 +167,9 @@ func (r *Registry) Deregister(id scheduler.HostID) error {
 	if !known {
 		return fmt.Errorf("%w: %s", ErrUnknownHost, id)
 	}
+	r.mu.Lock()
+	r.drainingSince[id] = r.cfg.Now()
+	r.mu.Unlock()
 	return r.sched.SetHostState(id, scheduler.HostDraining)
 }
 
@@ -170,6 +193,11 @@ func (r *Registry) Sweep() int {
 
 	for _, id := range expired {
 		_ = r.sched.SetHostState(id, scheduler.HostDraining)
+		r.mu.Lock()
+		if _, ok := r.drainingSince[id]; !ok {
+			r.drainingSince[id] = now
+		}
+		r.mu.Unlock()
 	}
 
 	r.reapEmptyDrainingHosts()
@@ -179,21 +207,44 @@ func (r *Registry) Sweep() int {
 // reapEmptyDrainingHosts removes draining hosts once their last microVM exits,
 // which is what actually returns capacity to the cluster.
 func (r *Registry) reapEmptyDrainingHosts() {
+	now := r.cfg.Now()
 	for _, h := range r.sched.Hosts() {
-		if h.State != scheduler.HostDraining || h.Used != 0 {
+		if h.State != scheduler.HostDraining {
 			continue
 		}
 		r.mu.Lock()
 		_, stillTracked := r.lastSeen[h.ID]
+		since, known := r.drainingSince[h.ID]
 		r.mu.Unlock()
 		if stillTracked {
 			continue
 		}
-		if _, err := r.sched.RemoveHost(h.ID); err != nil {
+
+		// Still serving, and its agent may yet report those guests expiring.
+		// Give it until ForceRemoveAfter before assuming nothing will.
+		if h.Used != 0 && known && now.Sub(since) < ForceRemoveAfter {
 			continue
 		}
+
+		orphaned, err := r.sched.RemoveHost(h.ID)
+		if err != nil {
+			continue
+		}
+		if len(orphaned) > 0 {
+			// The agent is gone, so these guests are already dead. Releasing
+			// their slots is recovering leaked capacity, not discarding work.
+			r.orphaned.Add(uint64(len(orphaned)))
+		}
+		r.mu.Lock()
+		delete(r.drainingSince, h.ID)
+		r.mu.Unlock()
 	}
 }
+
+// Orphaned counts microVMs whose slots were reclaimed because their host
+// vanished. A rising value means pods are being removed faster than their
+// guests retire.
+func (r *Registry) Orphaned() uint64 { return r.orphaned.Load() }
 
 // Run sweeps on an interval until done is closed.
 func (r *Registry) Run(done <-chan struct{}) {

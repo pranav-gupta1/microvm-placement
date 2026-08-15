@@ -37,7 +37,7 @@ spec:
             # One connection per expected in-flight request. Too few and the
             # generator serialises behind its own pool instead of offering the
             # load the envelope calls for.
-            - -max-conns=1024
+            - -max-conns=3072
             - -timeout=30s
           resources:
             requests: {cpu: 500m, memory: 256Mi}

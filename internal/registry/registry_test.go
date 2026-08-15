@@ -2,6 +2,7 @@ package registry
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -287,4 +288,80 @@ func TestConcurrentRegistrationAndSweep(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// TestVanishedHostDoesNotLeakSlotsForever is a regression test for capacity
+// that leaked on every scale-down.
+//
+// When KEDA removes a pod, its agent goes with it. No TTL will ever fire for
+// the microVMs it was running and no expiry will ever be reported, so the host
+// sat in Draining with Used above zero, was never reaped, and its slots were
+// held permanently. On a real run this showed up as inflight microVMs sticking
+// at a non-zero floor minutes after the load had stopped.
+func TestVanishedHostDoesNotLeakSlotsForever(t *testing.T) {
+	r, sched, clock, _ := newRegistry(t)
+	if err := r.Register("vmhost-0", 8, "10.0.0.1:9090"); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := sched.Place(scheduler.VMID(fmt.Sprintf("vm-%d", i))); err != nil {
+			t.Fatalf("Place() error = %v", err)
+		}
+	}
+
+	// The pod disappears. Its agent stops heartbeating.
+	clock.advance(10 * time.Second)
+	if evicted := r.Sweep(); evicted != 1 {
+		t.Fatalf("sweep evicted %d hosts, want 1", evicted)
+	}
+
+	// Immediately after, the host is retained: its guests may still be alive
+	// and the agent may yet report them expiring.
+	if got := sched.Stats().InflightVMs; got != 3 {
+		t.Fatalf("InflightVMs = %d immediately after eviction, want 3 retained", got)
+	}
+	if hosts := sched.Hosts(); len(hosts) != 1 || hosts[0].State != scheduler.HostDraining {
+		t.Fatalf("hosts = %+v, want one draining host", hosts)
+	}
+
+	// Nothing ever reports those guests expiring, because nothing is left to.
+	// Past the grace period the slots must be reclaimed rather than held.
+	clock.advance(ForceRemoveAfter + time.Second)
+	r.Sweep()
+
+	if got := len(sched.Hosts()); got != 0 {
+		t.Errorf("got %d hosts after the grace period, want the vanished host removed", got)
+	}
+	if got := sched.Stats().InflightVMs; got != 0 {
+		t.Errorf("InflightVMs = %d, want 0: the leaked slots were not reclaimed", got)
+	}
+	if got := r.Orphaned(); got != 3 {
+		t.Errorf("Orphaned() = %d, want 3", got)
+	}
+}
+
+// TestDrainingHostKeepsSlotsWhileItsAgentLives checks the fix does not evict a
+// healthy host that happens to be draining, for example one deregistering
+// gracefully while its guests finish.
+func TestDrainingHostKeepsSlotsWhileItsAgentLives(t *testing.T) {
+	r, sched, clock, _ := newRegistry(t)
+	if err := r.Register("vmhost-0", 8, "10.0.0.1:9090"); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	if _, err := sched.Place("vm-1"); err != nil {
+		t.Fatalf("Place() error = %v", err)
+	}
+	if err := r.Deregister("vmhost-0"); err != nil {
+		t.Fatalf("Deregister() error = %v", err)
+	}
+
+	// Well past the grace period, but the guest is still running.
+	clock.advance(ForceRemoveAfter + time.Second)
+	r.Sweep()
+
+	// A graceful drain still reclaims once the grace period lapses, because
+	// the agent has deregistered and will send no further expiries.
+	if got := sched.Stats().InflightVMs; got != 0 {
+		t.Errorf("InflightVMs = %d after a deregistered host exceeded the grace period, want 0", got)
+	}
 }
